@@ -12,10 +12,12 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   };
   const discoveredCameraState = ({
     credentials,
-    go2rtc
+    go2rtc,
+    annke
   }: {
     credentials: DiscoveredCamera['credentials'];
     go2rtc?: DiscoveredCamera['go2rtc'];
+    annke?: DiscoveredCamera['annke'];
   }): CameraDiscoveryState => ({
     staleAfterMs: 60 * 60 * 1000,
     errors: [],
@@ -48,7 +50,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           sub: 'driveway_sub'
         },
         credentials,
-        go2rtc: go2rtc ?? null
+        go2rtc: go2rtc ?? null,
+        annke: annke ?? null
       }
     ]
   });
@@ -100,6 +103,21 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         passwordSecretId: 'camera.uuid:driveway-camera.password'
       },
       go2rtc: observedGo2rtc(fixedNowMs - 5000)
+    });
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(discoveryState)
+    });
+  });
+  await page.route('**/api/annke/observe', async (route) => {
+    discoveryState = discoveredCameraState({
+      credentials: {
+        savedAtMs: fixedNowMs - 30000,
+        usernameSecretId: 'camera.uuid:driveway-camera.username',
+        passwordSecretId: 'camera.uuid:driveway-camera.password'
+      },
+      go2rtc: observedGo2rtc(fixedNowMs - 5000),
+      annke: observedAnnkeAi(fixedNowMs - 4000)
     });
     await route.fulfill({
       contentType: 'application/json',
@@ -302,6 +320,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
+        spec: 'Annke AI observation button is available',
+        check: async () => {
+          await expect(page.getByTestId('observe-annke-ai')).toBeVisible();
+          await expect(page.getByTestId('observe-annke-ai')).toBeEnabled();
+        }
+      },
+      {
         spec: 'go2rtc configuration is replayed from events',
         check: async () => {
           await expect(page.getByText('go2rtc configured')).toBeVisible();
@@ -328,6 +353,33 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await expect(page.getByText('Main ready: 1 producer, 0 consumers')).toBeVisible();
           await expect(page.getByText('Sub streaming: 1 producer, 1 consumer')).toBeVisible();
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('observe-annke-ai').click();
+  await tester.step('annke-ai-observed', {
+    description: 'Annke camera-side AI status is reduced from observed events',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Camera-side AI health is shown',
+        check: async () => {
+          await expect(page.getByText('Annke AI alert active · observed 4 seconds ago')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Motion target types are shown',
+        check: async () => {
+          await expect(page.getByText('Motion detection: enabled')).toBeVisible();
+          await expect(page.getByText('Targets: human, vehicle')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Last Annke alert is shown',
+        check: async () => {
+          await expect(page.getByText('Last alert: vehicle active 4 seconds ago')).toBeVisible();
         }
       }
     ]
@@ -395,6 +447,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'go2rtc observed age advances after one minute',
         check: async () => {
           await expect(page.getByText('go2rtc streaming · observed 1 minute ago')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Annke AI observed age advances after one minute',
+        check: async () => {
+          await expect(page.getByText('Annke AI alert active · observed 1 minute ago')).toBeVisible();
+          await expect(page.getByText('Last alert: vehicle active 1 minute ago')).toBeVisible();
         }
       }
     ]
@@ -471,6 +530,36 @@ function observedGo2rtc(observedAtMs: number): DiscoveredCamera['go2rtc'] {
         consumerCount: 1,
         health: 'streaming'
       }
+    }
+  };
+}
+
+function observedAnnkeAi(observedAtMs: number): DiscoveredCamera['annke'] {
+  return {
+    observedAtMs,
+    health: 'alert_active',
+    motionDetection: {
+      observedAtMs: observedAtMs - 1000,
+      ok: true,
+      enabled: true,
+      targetTypes: ['human', 'vehicle'],
+      sensitivityLevel: 60
+    },
+    smartCapabilities: {
+      observedAtMs: observedAtMs - 1000,
+      ok: true,
+      faceDetect: false,
+      audioDetection: false,
+      sceneChangeDetection: false
+    },
+    lastAlert: {
+      receivedAtMs: observedAtMs,
+      eventType: 'VMD',
+      eventState: 'active',
+      eventDescription: 'Motion alarm',
+      targetType: 'vehicle',
+      channelName: 'driveway',
+      cameraDateTime: '2026-06-10T12:30:55-04:00'
     }
   };
 }

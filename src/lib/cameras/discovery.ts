@@ -21,6 +21,37 @@ export interface DiscoveredCamera {
     passwordSecretId: string;
   } | null;
   go2rtc: Go2rtcCameraStatus | null;
+  annke: AnnkeCameraAiStatus | null;
+}
+
+export type AnnkeAiHealth = 'unknown' | 'motion_enabled' | 'alert_idle' | 'alert_active' | 'error';
+
+export interface AnnkeCameraAiStatus {
+  observedAtMs: number | null;
+  health: AnnkeAiHealth;
+  motionDetection: {
+    observedAtMs: number | null;
+    ok: boolean | null;
+    enabled: boolean | null;
+    targetTypes: string[];
+    sensitivityLevel: number | null;
+  };
+  smartCapabilities: {
+    observedAtMs: number | null;
+    ok: boolean | null;
+    faceDetect: boolean | null;
+    audioDetection: boolean | null;
+    sceneChangeDetection: boolean | null;
+  };
+  lastAlert: {
+    receivedAtMs: number;
+    eventType: string | null;
+    eventState: string | null;
+    eventDescription: string | null;
+    targetType: string | null;
+    channelName: string | null;
+    cameraDateTime: string | null;
+  } | null;
 }
 
 export type Go2rtcStreamRole = 'main' | 'sub';

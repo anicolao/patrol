@@ -9,6 +9,7 @@
   let error: string | null = null;
   let discovering = false;
   let observingGo2rtc = false;
+  let observingAnnkeAi = false;
   let hydrated = false;
   let activeTab: Tab = 'cameras';
   let nowMs = Date.now();
@@ -67,6 +68,23 @@
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
       observingGo2rtc = false;
+    }
+  }
+
+  async function observeAnnkeAi() {
+    observingAnnkeAi = true;
+    error = null;
+
+    try {
+      const response = await fetch('/api/annke/observe', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`Annke AI observation failed with HTTP ${response.status}`);
+      }
+      discoveryState = (await response.json()) as CameraDiscoveryState;
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    } finally {
+      observingAnnkeAi = false;
     }
   }
 
@@ -131,6 +149,25 @@
       default:
         return 'configured';
     }
+  }
+
+  function annkeHealthLabel(health: string) {
+    switch (health) {
+      case 'alert_active':
+        return 'alert active';
+      case 'alert_idle':
+        return 'alert idle';
+      case 'motion_enabled':
+        return 'motion AI enabled';
+      case 'error':
+        return 'error';
+      default:
+        return 'unknown';
+    }
+  }
+
+  function targetTypesLabel(targetTypes: string[]) {
+    return targetTypes.length > 0 ? targetTypes.join(', ') : 'none reported';
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -360,17 +397,29 @@
       <div class="section-header">
         <div>
           <h2 id="health-title">Monitoring</h2>
-          <p>Observe go2rtc and reduce the latest stream facts into system health.</p>
+          <p>Observe go2rtc and Annke camera-side AI facts into system health.</p>
         </div>
-        <button
-          type="button"
-          onclick={observeGo2rtc}
-          disabled={observingGo2rtc || !hydrated}
-          aria-busy={observingGo2rtc}
-          data-testid="observe-go2rtc"
-        >
-          {observingGo2rtc ? 'Observing...' : 'Observe'}
-        </button>
+        <div class="section-actions">
+          <button
+            type="button"
+            onclick={observeGo2rtc}
+            disabled={observingGo2rtc || !hydrated}
+            aria-busy={observingGo2rtc}
+            data-testid="observe-go2rtc"
+          >
+            {observingGo2rtc ? 'Observing...' : 'Observe go2rtc'}
+          </button>
+          <button
+            type="button"
+            class="secondary"
+            onclick={observeAnnkeAi}
+            disabled={observingAnnkeAi || !hydrated}
+            aria-busy={observingAnnkeAi}
+            data-testid="observe-annke-ai"
+          >
+            {observingAnnkeAi ? 'Observing...' : 'Observe Annke AI'}
+          </button>
+        </div>
       </div>
 
       {#if discoveryState?.devices.length}
@@ -415,6 +464,36 @@
               {:else}
                 <p class="notice compact" data-testid="go2rtc-camera-status">
                   go2rtc has not materialized stream configuration for this camera yet.
+                </p>
+              {/if}
+
+              {#if camera.annke}
+                <div class="annke-status" data-health={camera.annke.health} data-testid="annke-ai-status">
+                  <p>
+                    Annke AI {annkeHealthLabel(camera.annke.health)}
+                    {#if camera.annke.observedAtMs}
+                      · observed {timeAgo(camera.annke.observedAtMs, nowMs)} ago
+                    {/if}
+                  </p>
+                  <ul>
+                    <li>
+                      Motion detection:
+                      {camera.annke.motionDetection.enabled === true ? 'enabled' : camera.annke.motionDetection.enabled === false ? 'disabled' : 'unknown'}
+                    </li>
+                    <li>Targets: {targetTypesLabel(camera.annke.motionDetection.targetTypes)}</li>
+                    {#if camera.annke.lastAlert}
+                      <li>
+                        Last alert:
+                        {camera.annke.lastAlert.targetType ?? camera.annke.lastAlert.eventType ?? 'unknown'}
+                        {camera.annke.lastAlert.eventState ?? 'unknown'}
+                        {timeAgo(camera.annke.lastAlert.receivedAtMs, nowMs)} ago
+                      </li>
+                    {/if}
+                  </ul>
+                </div>
+              {:else}
+                <p class="notice compact" data-testid="annke-ai-status">
+                  Annke camera-side AI has not been observed yet.
                 </p>
               {/if}
             </li>
@@ -553,6 +632,11 @@
     border-radius: 8px;
     background: #ffffff;
     padding: 16px;
+  }
+
+  .section-actions {
+    display: grid;
+    gap: 8px;
   }
 
   .section-header p {
@@ -811,6 +895,45 @@
     border-radius: 6px;
     background: #f9fafb;
     padding: 10px 12px;
+  }
+
+  .annke-status {
+    margin-top: 10px;
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #f9fafb;
+    padding: 10px 12px;
+  }
+
+  .annke-status[data-health="motion_enabled"],
+  .annke-status[data-health="alert_idle"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+  }
+
+  .annke-status[data-health="alert_active"] {
+    border-color: #dfc979;
+    background: #fff9e8;
+  }
+
+  .annke-status[data-health="error"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+  }
+
+  .annke-status p {
+    margin-bottom: 6px;
+    color: #3d4752;
+    font-weight: 650;
+  }
+
+  .annke-status ul {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: #52606d;
+    font-size: 0.88rem;
   }
 
   .go2rtc-status[data-health="streaming"],

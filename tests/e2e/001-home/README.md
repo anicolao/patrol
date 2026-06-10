@@ -63,6 +63,7 @@
 **Verifications:**
 - [x] Health tab is selected
 - [x] go2rtc observation button is available
+- [x] Annke AI observation button is available
 - [x] go2rtc configuration is replayed from events
 
 ---
@@ -77,9 +78,20 @@
 
 ---
 
+## Annke camera-side AI status is reduced from observed events
+
+![Annke camera-side AI status is reduced from observed events](./screenshots/007-annke-ai-observed.png)
+
+**Verifications:**
+- [x] Camera-side AI health is shown
+- [x] Motion target types are shown
+- [x] Last Annke alert is shown
+
+---
+
 ## High-resolution live camera view is shown
 
-![High-resolution live camera view is shown](./screenshots/007-live-view.png)
+![High-resolution live camera view is shown](./screenshots/008-live-view.png)
 
 **Verifications:**
 - [x] Live camera route opens from the preview card
@@ -89,7 +101,7 @@
 
 ## Settings timestamp labels refresh without reload
 
-![Settings timestamp labels refresh without reload](./screenshots/008-refreshed-times.png)
+![Settings timestamp labels refresh without reload](./screenshots/009-refreshed-times.png)
 
 **Verifications:**
 - [x] Last discovery age advances after one minute
@@ -100,9 +112,10 @@
 
 ## Health timestamp labels refresh without reload
 
-![Health timestamp labels refresh without reload](./screenshots/009-health-refreshed-times.png)
+![Health timestamp labels refresh without reload](./screenshots/010-health-refreshed-times.png)
 
 **Verifications:**
 - [x] go2rtc observed age advances after one minute
+- [x] Annke AI observed age advances after one minute
 
 ---
