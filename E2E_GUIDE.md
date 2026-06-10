@@ -5,9 +5,8 @@ E2E tests are the primary source of truth for frontend behavior.
 
 ## 1. The Philosophy: Zero-Pixel Tolerance
 
-Patrol inherits the E2E testing pattern from `antigravity/food`: visual state is
-part of correctness, so committed screenshots should be deterministic and should
-not drift casually.
+Visual state is part of correctness, so committed screenshots should be
+deterministic and should not drift casually.
 
 - **Software rendering**: browsers launch with flags that reduce machine-specific
   rendering differences.
