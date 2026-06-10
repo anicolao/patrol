@@ -6,6 +6,10 @@ const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patro
 const eventsDir = path.join(dataRoot, 'events');
 const secretsDir = path.join(dataRoot, 'secrets');
 const go2rtcDir = path.join(dataRoot, 'go2rtc');
+const go2rtcApiBaseUrl = process.env.PATROL_GO2RTC_API_BASE_URL ?? 'http://127.0.0.1:1984';
+const go2rtcApiListen = process.env.PATROL_GO2RTC_API_LISTEN ?? '0.0.0.0:1984';
+const go2rtcRtspListen = process.env.PATROL_GO2RTC_RTSP_LISTEN ?? '127.0.0.1:8554';
+const go2rtcWebrtcListen = process.env.PATROL_GO2RTC_WEBRTC_LISTEN ?? ':8555';
 
 const cameras = reduceCameras(await readJsonlDir(eventsDir, 'cameras-'));
 const secrets = latestSecretsByCamera(await readJsonlDir(secretsDir, 'secrets-'));
@@ -19,7 +23,7 @@ await appendCameraEvent({
   type: 'go2rtc.config.materialized',
   source: 'patrol-go2rtc-config',
   payload: {
-    apiBaseUrl: 'http://127.0.0.1:1984',
+    apiBaseUrl: go2rtcApiBaseUrl,
     configPath,
     streams: configured.flatMap((camera) => [
       {
@@ -111,11 +115,11 @@ function latestSecretsByCamera(events) {
 function renderConfig(cameras, secrets) {
   return [
     'api:',
-    '  listen: "127.0.0.1:1984"',
+    `  listen: ${yamlString(go2rtcApiListen)}`,
     'rtsp:',
-    '  listen: "127.0.0.1:8554"',
+    `  listen: ${yamlString(go2rtcRtspListen)}`,
     'webrtc:',
-    '  listen: ":8555"',
+    `  listen: ${yamlString(go2rtcWebrtcListen)}`,
     'streams:',
     ...cameras.flatMap((camera) => {
       const credentials = secrets.get(camera.id);

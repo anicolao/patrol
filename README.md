@@ -80,7 +80,15 @@ helper into the environment needed by stream workers such as go2rtc.
 This gives the system one central debugging rule: if Patrol did something, there
 should be an event explaining what it saw, decided, or was asked to do.
 
+## Operations
+
+Use `WATCHDOG_SETUP.md` to install the local cron watchdog. It checks the
+system health reducer every minute and sends Pushover notifications when any
+expected security service is not green.
+
 ## Repository Status
 
-This repository currently contains design documents only. Implementation should
-start with the minimum viable pipeline described in `MVP_DESIGN.md`.
+This repository now contains the early Patrol implementation: camera discovery,
+go2rtc stream materialization, Annke event observation, live event streaming,
+and system health monitoring. `MVP_DESIGN.md` remains the implementation guide
+for the next pieces of the pipeline.
