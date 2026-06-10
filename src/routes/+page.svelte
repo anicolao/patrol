@@ -6,6 +6,7 @@
   let error: string | null = null;
   let discovering = false;
   let hydrated = false;
+  let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
 
   onMount(() => {
     hydrated = true;
@@ -30,6 +31,54 @@
 
   function displayName(camera: DiscoveredCamera) {
     return camera.name ?? camera.hardware ?? camera.remoteAddress;
+  }
+
+  async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+
+    const formData = new FormData(form);
+    const username = String(formData.get('username') ?? '');
+    const password = String(formData.get('password') ?? '');
+
+    credentialStatus = {
+      ...credentialStatus,
+      [camera.id]: { state: 'saving', message: 'Saving credentials...' }
+    };
+
+    try {
+      const response = await fetch('/api/cameras/credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          cameraId: camera.id,
+          host: camera.remoteAddress,
+          username,
+          password
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Credential save failed with HTTP ${response.status}`);
+      }
+
+      credentialStatus = {
+        ...credentialStatus,
+        [camera.id]: { state: 'saved', message: 'Credentials saved to the local secrets log.' }
+      };
+      form.reset();
+    } catch (caught) {
+      credentialStatus = {
+        ...credentialStatus,
+        [camera.id]: {
+          state: 'error',
+          message: caught instanceof Error ? caught.message : String(caught)
+        }
+      };
+    }
   }
 </script>
 
@@ -91,7 +140,7 @@
               <dl>
                 <div>
                   <dt>Vendor</dt>
-                  <dd>{camera.vendorHint ?? 'Unknown'}</dd>
+                  <dd>{camera.vendorHint ?? 'Unknown from ONVIF discovery'}</dd>
                 </div>
                 <div>
                   <dt>Hardware</dt>
@@ -106,6 +155,45 @@
                   <dd>{camera.xaddrs.join(', ') || 'None reported'}</dd>
                 </div>
               </dl>
+
+              <div class="setup-actions">
+                <a href={camera.setupUrl} target="_blank" rel="noreferrer">
+                  Open camera setup
+                </a>
+                <p>
+                  Use this link for first-time camera setup, then enter the camera credentials
+                  Patrol should use.
+                </p>
+              </div>
+
+              <form class="credentials-form" onsubmit={(event) => saveCredentials(camera, event)}>
+                <label>
+                  <span>Username for {displayName(camera)}</span>
+                  <input name="username" autocomplete="username" required />
+                </label>
+                <label>
+                  <span>Password for {displayName(camera)}</span>
+                  <input name="password" type="password" autocomplete="current-password" required />
+                </label>
+                <button
+                  type="submit"
+                  class="secondary"
+                  disabled={credentialStatus[camera.id]?.state === 'saving'}
+                >
+                  {credentialStatus[camera.id]?.state === 'saving' ? 'Saving...' : 'Save credentials'}
+                </button>
+              </form>
+
+              {#if credentialStatus[camera.id]}
+                <p
+                  class:error={credentialStatus[camera.id].state === 'error'}
+                  class:success={credentialStatus[camera.id].state === 'saved'}
+                  class="credential-status"
+                  role="status"
+                >
+                  {credentialStatus[camera.id].message}
+                </p>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -213,6 +301,11 @@
     padding: 9px 14px;
   }
 
+  a {
+    color: #1f4f82;
+    font-weight: 650;
+  }
+
   button:disabled {
     cursor: wait;
     opacity: 0.65;
@@ -263,6 +356,62 @@
   .camera-card p {
     margin-bottom: 12px;
     color: #66727f;
+  }
+
+  .setup-actions {
+    display: grid;
+    gap: 6px;
+    margin-top: 16px;
+    border-top: 1px solid #e2e5e9;
+    padding-top: 16px;
+  }
+
+  .setup-actions p {
+    margin-bottom: 0;
+  }
+
+  .credentials-form {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+  }
+
+  label {
+    display: grid;
+    gap: 6px;
+  }
+
+  label span {
+    color: #3d4752;
+    font-size: 0.85rem;
+    font-weight: 650;
+  }
+
+  input {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid #cbd1d8;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #171a1f;
+    font: inherit;
+    padding: 9px 10px;
+  }
+
+  .secondary {
+    width: fit-content;
+    min-width: 144px;
+    border-color: #cbd1d8;
+    background: #ffffff;
+    color: #1f2937;
+  }
+
+  .credential-status {
+    margin: 12px 0 0;
+  }
+
+  .success {
+    color: #17683a;
   }
 
   dl {

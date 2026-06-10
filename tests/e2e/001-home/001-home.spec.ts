@@ -22,6 +22,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             endpoint: 'uuid:driveway-camera',
             remoteAddress: '10.20.240.193',
             xaddrs: ['http://10.20.240.193/onvif/device_service'],
+            setupUrl: 'http://10.20.240.193',
             scopes: [
               'onvif://www.onvif.org/name/driveway',
               'onvif://www.onvif.org/hardware/Annke%20C800'
@@ -33,6 +34,22 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             vendorHint: 'annke'
           }
         ]
+      })
+    });
+  });
+  let credentialRequest: unknown = null;
+  await page.route('**/api/cameras/credentials', async (route) => {
+    credentialRequest = route.request().postDataJSON();
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        cameraId: 'uuid:driveway-camera',
+        host: '10.20.240.193',
+        storedAtMs: 1781099112445,
+        secretIds: {
+          username: 'camera.uuid:driveway-camera.username',
+          password: 'camera.uuid:driveway-camera.password'
+        }
       })
     });
   });
@@ -87,6 +104,43 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Camera address is shown',
         check: async () => {
           await expect(page.getByText('10.20.240.193', { exact: true })).toBeVisible();
+        }
+      },
+      {
+        spec: 'First-time setup link opens camera web UI',
+        check: async () => {
+          await expect(page.getByRole('link', { name: 'Open camera setup' })).toHaveAttribute(
+            'href',
+            'http://10.20.240.193'
+          );
+        }
+      }
+    ]
+  });
+
+  await page.getByLabel('Username for driveway').fill('admin');
+  await page.getByLabel('Password for driveway').fill('camera-password');
+  await page.getByRole('button', { name: 'Save credentials' }).click();
+
+  await tester.step('credentials-saved', {
+    description: 'Camera credentials are accepted',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Credentials save status is shown',
+        check: async () => {
+          await expect(page.getByText('Credentials saved to the local secrets log.')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Credential request includes camera identity and credentials',
+        check: async () => {
+          expect(credentialRequest).toMatchObject({
+            cameraId: 'uuid:driveway-camera',
+            host: '10.20.240.193',
+            username: 'admin',
+            password: 'camera-password'
+          });
         }
       }
     ]

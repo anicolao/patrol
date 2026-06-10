@@ -109,6 +109,7 @@ function parseProbeResponse(response: ProbeResponse): DiscoveredCamera {
     endpoint,
     remoteAddress: response.remoteAddress,
     xaddrs,
+    setupUrl: setupUrl(response.remoteAddress),
     scopes,
     types,
     name: scopeValue(scopes, '/name/'),
@@ -153,10 +154,11 @@ function inferVendor(scopes: string[], xaddrs: string[]) {
   if (haystack.includes('hikvision')) {
     return 'hikvision';
   }
-  if (haystack.includes('onvif')) {
-    return 'onvif';
-  }
   return null;
+}
+
+function setupUrl(remoteAddress: string) {
+  return remoteAddress.includes(':') ? `http://[${remoteAddress}]` : `http://${remoteAddress}`;
 }
 
 function dedupeDevices(devices: DiscoveredCamera[]) {

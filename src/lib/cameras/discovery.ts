@@ -3,6 +3,7 @@ export interface DiscoveredCamera {
   endpoint: string | null;
   remoteAddress: string;
   xaddrs: string[];
+  setupUrl: string;
   scopes: string[];
   types: string[];
   name: string | null;
