@@ -11,11 +11,38 @@ export interface DiscoveredCamera {
   hardware: string | null;
   location: string | null;
   vendorHint: string | null;
+  streams: {
+    main: string;
+    sub: string;
+  };
   credentials: {
     savedAtMs: number;
     usernameSecretId: string;
     passwordSecretId: string;
   } | null;
+  go2rtc: Go2rtcCameraStatus | null;
+}
+
+export type Go2rtcStreamRole = 'main' | 'sub';
+
+export type Go2rtcCameraHealth = 'configured' | 'ready' | 'streaming' | 'partial' | 'offline';
+
+export interface Go2rtcStreamStatus {
+  streamName: string;
+  configured: boolean;
+  observed: boolean;
+  producerCount: number;
+  consumerCount: number;
+  health: Go2rtcCameraHealth;
+}
+
+export interface Go2rtcCameraStatus {
+  configuredAtMs: number | null;
+  observedAtMs: number | null;
+  apiReachable: boolean | null;
+  apiBaseUrl: string | null;
+  health: Go2rtcCameraHealth;
+  streams: Record<Go2rtcStreamRole, Go2rtcStreamStatus>;
 }
 
 export interface RawProbeResponse {
