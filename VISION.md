@@ -23,6 +23,8 @@ platform. A person maintaining it should be able to answer:
 - What did the system know when it made this decision?
 - Which user changed this setting?
 - Can the current UI state be rebuilt from durable logs?
+- Can camera configuration be rebuilt from events without relying on an
+  unchecked local config file?
 
 ## Design Principles
 
@@ -34,6 +36,21 @@ the system should be able to replay events and recover.
 
 Events should be simple JSON objects with explicit schemas. They should be easy
 to inspect with command-line tools, archive, diff, and replay in tests.
+Timestamps should be numeric epoch values, preferably milliseconds since the
+Unix epoch for UI precision and JavaScript ergonomics.
+
+### Configuration Through Events
+
+Camera configuration should not be a checked-in YAML file. The UI should emit
+configuration command events, reducers should materialize effective camera
+state, and workers should consume that materialized state.
+
+Secrets need different handling. A camera password or token can be submitted
+through the UI, but it should be appended only to a restricted write-only
+secrets event log. A small helper script or binary should replay that secrets
+log and export the environment variables or local secret files needed by
+go2rtc, camera control workers, and other processes. Normal state snapshots and
+general event logs should record that a secret changed, not the secret value.
 
 ### Camera-Native Integration
 
@@ -92,6 +109,13 @@ Patrol deployment must prove that:
 - detector workers are alive and emitting heartbeat events
 - UI state reflects recent events
 - camera outages and recoveries are recorded
+
+### TypeScript By Default
+
+Non-performance-sensitive workers, reducers, APIs, and the SvelteKit UI should
+be implemented in TypeScript. If a hot path proves that TypeScript is the wrong
+tool, use Go for that isolated worker or library. The initial assumption is that
+the whole MVP can be TypeScript unless measurement shows otherwise.
 
 ## Relationship To Frigate
 

@@ -15,6 +15,10 @@ additional cameras.
 - A recording indexer that emits events as segments are created and finalized.
 - Append-only JSONL event logs.
 - Reducers that replay event logs into current system state.
+- Camera configuration hydrated from configuration events submitted through the
+  UI.
+- A restricted write-only secrets event log plus a materializer for worker
+  environment variables.
 - A SvelteKit UI that subscribes to live events and displays derived state.
 - Object detection for people, animals, and cars.
 - License plate detection and OCR as a first-class planned detector path.
@@ -76,6 +80,8 @@ data/
     recordings-2026-06-10.jsonl
     detections-2026-06-10.jsonl
     commands-2026-06-10.jsonl
+  secrets/
+    secrets-2026-06-10.jsonl
   state/
     current.json
     cameras.json
@@ -92,7 +98,7 @@ Initial event shape:
 ```json
 {
   "id": "01JZ3HZQ8F6Y7WQ9W4ZW2PSZVB",
-  "ts": "2026-06-10T13:45:12.345Z",
+  "ts_ms": 1781099112345,
   "type": "recording.segment.finalized",
   "source": "patrol-recorder",
   "schema": 1,
@@ -100,8 +106,8 @@ Initial event shape:
   "correlation_id": "01JZ3HZPZ4ZK2WTKGG0E6F1S9B",
   "payload": {
     "path": "recordings/driveway/2026/06/10/13/45/10.mp4",
-    "start_ts": "2026-06-10T13:45:10.000Z",
-    "end_ts": "2026-06-10T13:45:20.000Z",
+    "start_ts_ms": 1781099110000,
+    "end_ts_ms": 1781099120000,
     "video_codec": "h264",
     "audio_codec": "pcmu",
     "width": 3632,
@@ -114,7 +120,7 @@ Initial event shape:
 Required top-level fields:
 
 - `id`: globally unique event ID
-- `ts`: event timestamp in UTC
+- `ts_ms`: event timestamp as milliseconds since the Unix epoch in UTC
 - `type`: reducer action type
 - `source`: subsystem that appended the event
 - `schema`: integer schema version
@@ -137,6 +143,9 @@ System:
 
 Camera:
 
+- `camera.config.requested`
+- `camera.config.applied`
+- `camera.config.failed`
 - `camera.discovered`
 - `camera.capabilities.updated`
 - `camera.stream.connected`
@@ -169,6 +178,9 @@ Detection:
 User commands:
 
 - `command.user.login`
+- `command.camera.add`
+- `command.camera.update`
+- `command.camera.remove`
 - `command.camera.set_osd`
 - `command.camera.play_sound`
 - `command.camera.set_audio_volume`
@@ -177,12 +189,21 @@ User commands:
 - `command.plate.mark_trusted`
 - `command.recording.export`
 
+Secrets:
+
+- `secret.set.requested`
+- `secret.set.applied`
+- `secret.materialized`
+- `secret.materialization.failed`
+
 ## Camera Configuration
 
-Configuration should be explicit and checked into a local config file, with
-secrets separated into environment or a local secrets file.
+Camera configuration should be explicit, but not checked into a local config
+file. The UI should submit camera configuration commands, those commands should
+be appended as events, and reducers should materialize the effective camera
+state consumed by workers.
 
-Example:
+Example materialized camera state:
 
 ```yaml
 cameras:
@@ -202,6 +223,38 @@ cameras:
       osd: true
       alarm_audio: true
       lights: discover
+```
+
+Secrets are configured through the UI as well, but they follow a separate path.
+Secret values should be written only to a restricted append-only secrets event
+log. The normal configuration event can record metadata such as secret ID,
+camera ID, version, and update time, but not the secret value.
+
+A small materializer script or binary should replay the secrets log and export
+the runtime state needed by workers. For go2rtc, that can be environment
+variables or generated local secret files that are readable only by the service
+account. This keeps normal event replay auditable without spreading credentials
+through general logs and state snapshots.
+
+Example non-secret configuration event:
+
+```json
+{
+  "id": "01JZ3J9JWR5ZYCKAZ3X24W2JKB",
+  "ts_ms": 1781099200000,
+  "type": "camera.config.applied",
+  "source": "patrol-reducer",
+  "schema": 1,
+  "camera_id": "driveway",
+  "payload": {
+    "host": "10.20.240.193",
+    "vendor": "annke",
+    "rtsp_username_secret_id": "driveway.rtsp.username",
+    "rtsp_password_secret_id": "driveway.rtsp.password",
+    "main_stream": "/Streaming/Channels/101?transportmode=unicast&profile=Profile_1",
+    "sub_stream": "/Streaming/Channels/102?transportmode=unicast&profile=Profile_2"
+  }
+}
 ```
 
 ## Media Pipeline
@@ -266,6 +319,10 @@ Initial state domains:
 Reducers must be deterministic. Given the same event files, they should produce
 the same state.
 
+Secret materialization is intentionally separate from normal reducers. Normal
+reducers can track secret references and versions, but only the restricted
+secret materializer should replay secret values.
+
 ## SvelteKit UI
 
 The UI should be operational, not decorative.
@@ -277,6 +334,8 @@ Initial screens:
 - Events: timeline of people, animals, vehicles, faces, plates, and commands.
 - Recordings: time-based video browser.
 - Cameras: Annke capabilities, stream profiles, OSD, audio, alarms, lights.
+- Camera Setup: add cameras, update stream roles, and submit credentials through
+  the restricted secrets path.
 - Audit: raw event log viewer with filters.
 
 The UI should not mutate state directly. It should submit commands, log command
@@ -302,26 +361,45 @@ Recovery should be evented:
 
 Manual recovery actions from the UI should follow the same event path.
 
+## Implementation Language
+
+Patrol should be TypeScript-first:
+
+- SvelteKit UI in TypeScript.
+- API, reducers, event readers/writers, camera control workers, configuration
+  materializers, and watchdogs in TypeScript unless profiling proves otherwise.
+- Shared event schemas defined as TypeScript types and runtime validators.
+- Performance-sensitive workers may be written in Go when measurement justifies
+  the extra language boundary.
+
+The current expectation is that the MVP can be implemented entirely in
+TypeScript, because the expensive work is delegated to go2rtc, ffmpeg, and AI
+runtime libraries.
+
 ## MVP Milestones
 
 1. Repository scaffolding and event schema tests.
-2. go2rtc config generation for one Annke camera.
-3. FFmpeg recorder with segment finalization events.
-4. Reducer that builds camera and recording state from JSONL.
-5. SvelteKit overview showing live event-derived health.
-6. Object detector emitting person/animal/car events.
-7. High-resolution crop path for face and plate tasks.
-8. License plate detection/OCR prototype.
-9. Camera control worker for OSD, audio volume, and sound playback.
-10. Watchdog restart loop with evented health failures.
+2. TypeScript event writer, reader, and reducer harness.
+3. UI-driven camera configuration events and materialized camera state.
+4. Restricted secrets event log and go2rtc environment materializer.
+5. go2rtc config generation for one Annke camera.
+6. FFmpeg recorder with segment finalization events.
+7. Reducer that builds camera and recording state from JSONL.
+8. SvelteKit overview showing live event-derived health.
+9. Object detector emitting person/animal/car events.
+10. High-resolution crop path for face and plate tasks.
+11. License plate detection/OCR prototype.
+12. Camera control worker for OSD, audio volume, and sound playback.
+13. Watchdog restart loop with evented health failures.
 
 ## Open Questions
 
-- Which language should own the long-running backend workers: TypeScript,
-  Python, Go, or a small mix around event contracts?
+- Which hot paths, if any, justify Go instead of TypeScript?
 - Which local models give the best license plate results on Apple Silicon?
 - Should media metadata live only in events, or also in a small SQLite index
   derived from events?
 - How much Annke/Hikvision ISAPI surface should be wrapped in the MVP?
 - What is the best crop retention policy for face and plate recognition without
   producing excessive sensitive artifacts?
+- What exact file permissions and process boundary should protect the secrets
+  event log on macOS?

@@ -18,7 +18,8 @@ The project starts from a few lessons learned while evaluating Frigate on macOS:
 - Detect people, animals, cars, and license plates with local AI models.
 - Use Annke-native APIs for camera metadata, audio, OSD, lights, alarms, and
   other capabilities when available.
-- Store every system observation and user action as an append-only event.
+- Store every system observation, user action, and configuration change as an
+  append-only event.
 - Rebuild current system state by replaying event logs through reducers.
 - Provide a SvelteKit UI that displays live state and subscribes to event
   streams.
@@ -61,12 +62,18 @@ queryable state snapshots + SvelteKit UI
 ## Event Log
 
 Subsystems append newline-delimited JSON events to durable files. Events are
-Redux-style records: each event has a type, timestamp, source, payload, and
-stable identifiers for related cameras, streams, recordings, and detections.
+Redux-style records: each event has a type, epoch timestamp, source, payload,
+and stable identifiers for related cameras, streams, recordings, and
+detections.
 
 User actions are events too. If a person changes a setting, classifies a face,
 plays an alarm sound, or marks a license plate as trusted, Patrol records that
 command before applying it.
+
+Camera configuration is also hydrated from events. Cameras should be added and
+changed through the UI, with reducers materializing the effective camera state.
+Secrets use a separate write-only event log and are materialized by a small
+helper into the environment needed by stream workers such as go2rtc.
 
 This gives the system one central debugging rule: if Patrol did something, there
 should be an event explaining what it saw, decided, or was asked to do.
