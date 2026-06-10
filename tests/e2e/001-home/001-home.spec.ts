@@ -57,7 +57,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     page,
     testInfo
   );
-  tester.setMetadata('Patrol Camera Discovery', 'The SvelteKit frontend serves camera discovery.');
+  tester.setMetadata('Patrol Camera View', 'The SvelteKit frontend serves tabbed camera operations.');
 
   await page.clock.install({ time: fixedNowMs });
 
@@ -118,7 +118,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   await page.goto('/');
 
   await tester.step('home-page', {
-    description: 'Patrol camera discovery panel is visible',
+    description: 'Patrol camera view is visible',
     networkStatus: 'skip',
     verifications: [
       {
@@ -128,9 +128,42 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'Patrol heading is visible',
+        spec: 'Cameras heading is visible',
         check: async () => {
-          await expect(page.getByRole('heading', { name: 'Patrol' })).toBeVisible();
+          await expect(page.getByRole('heading', { name: 'Cameras', exact: true })).toBeVisible();
+        }
+      },
+      {
+        spec: 'Empty camera state points to settings',
+        check: async () => {
+          await expect(page.getByText('No configured cameras')).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Open Settings' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Open Settings' })).toBeEnabled();
+        }
+      },
+      {
+        spec: 'Bottom tab buttons are available',
+        check: async () => {
+          await expect(page.getByTestId('tab-cameras')).toHaveAttribute('aria-current', 'page');
+          await expect(page.getByTestId('tab-settings')).toBeVisible();
+          await expect(page.getByTestId('tab-settings')).toBeEnabled();
+          await expect(page.getByTestId('tab-health')).toBeVisible();
+          await expect(page.getByTestId('tab-health')).toBeEnabled();
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-settings').click();
+  await tester.step('settings-tab', {
+    description: 'Discovery and configuration controls are in settings',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Settings tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+          await expect(page.getByTestId('tab-settings')).toHaveAttribute('aria-current', 'page');
         }
       },
       {
@@ -138,13 +171,6 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await expect(page.getByTestId('discover-cameras')).toBeVisible();
           await expect(page.getByTestId('discover-cameras')).toBeEnabled();
-        }
-      },
-      {
-        spec: 'go2rtc observation button is available',
-        check: async () => {
-          await expect(page.getByTestId('observe-go2rtc')).toBeVisible();
-          await expect(page.getByTestId('observe-go2rtc')).toBeEnabled();
         }
       },
       {
@@ -215,6 +241,32 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
+        spec: 'Credential request includes camera identity and credentials',
+        check: async () => {
+          expect(credentialRequest).toMatchObject({
+            cameraId: 'uuid:driveway-camera',
+            host: '10.20.240.193',
+            username: 'admin',
+            password: 'camera-password'
+          });
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-cameras').click();
+  await tester.step('camera-grid', {
+    description: 'Configured cameras show substream previews',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Cameras tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'Cameras', exact: true })).toBeVisible();
+          await expect(page.getByTestId('tab-cameras')).toHaveAttribute('aria-current', 'page');
+        }
+      },
+      {
         spec: 'Credentialed camera preview is shown through go2rtc',
         check: async () => {
           await expect(page.getByTestId('camera-preview-link')).toHaveAttribute(
@@ -226,6 +278,28 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             /http:\/\/localhost:1984\/stream\.html\?.*src=driveway_sub/
           );
         }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-health').click();
+  await tester.step('health-tab-configured', {
+    description: 'go2rtc configuration status is in system health',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Health tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
+          await expect(page.getByTestId('tab-health')).toHaveAttribute('aria-current', 'page');
+        }
+      },
+      {
+        spec: 'go2rtc observation button is available',
+        check: async () => {
+          await expect(page.getByTestId('observe-go2rtc')).toBeVisible();
+          await expect(page.getByTestId('observe-go2rtc')).toBeEnabled();
+        }
       },
       {
         spec: 'go2rtc configuration is replayed from events',
@@ -233,17 +307,6 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('go2rtc configured')).toBeVisible();
           await expect(page.getByText('Main configured: 0 producers, 0 consumers')).toBeVisible();
           await expect(page.getByText('Sub configured: 0 producers, 0 consumers')).toBeVisible();
-        }
-      },
-      {
-        spec: 'Credential request includes camera identity and credentials',
-        check: async () => {
-          expect(credentialRequest).toMatchObject({
-            cameraId: 'uuid:driveway-camera',
-            host: '10.20.240.193',
-            username: 'admin',
-            password: 'camera-password'
-          });
         }
       }
     ]
@@ -270,6 +333,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     ]
   });
 
+  await page.getByTestId('tab-cameras').click();
   await page.getByTestId('camera-preview-link').click();
   await tester.step('live-view', {
     description: 'High-resolution live camera view is shown',
@@ -296,8 +360,9 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
 
   await page.clock.fastForward(60 * 1000);
   await page.getByRole('link', { name: 'Back to cameras' }).click();
+  await page.getByTestId('tab-settings').click();
   await tester.step('refreshed-times', {
-    description: 'Timestamp labels refresh without reload',
+    description: 'Settings timestamp labels refresh without reload',
     networkStatus: 'skip',
     verifications: [
       {
@@ -313,15 +378,23 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'go2rtc observed age advances after one minute',
-        check: async () => {
-          await expect(page.getByText('go2rtc streaming · observed 1 minute ago')).toBeVisible();
-        }
-      },
-      {
         spec: 'Credential saved age advances after one minute',
         check: async () => {
           await expect(page.getByText('Credentials saved 1 minute ago.')).toBeVisible();
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-health').click();
+  await tester.step('health-refreshed-times', {
+    description: 'Health timestamp labels refresh without reload',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'go2rtc observed age advances after one minute',
+        check: async () => {
+          await expect(page.getByText('go2rtc streaming · observed 1 minute ago')).toBeVisible();
         }
       }
     ]

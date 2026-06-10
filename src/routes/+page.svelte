@@ -3,11 +3,14 @@
   import { browser } from '$app/environment';
   import type { CameraDiscoveryState, DiscoveredCamera } from '$lib/cameras/discovery';
 
+  type Tab = 'cameras' | 'settings' | 'health';
+
   let discoveryState: CameraDiscoveryState | null = null;
   let error: string | null = null;
   let discovering = false;
   let observingGo2rtc = false;
   let hydrated = false;
+  let activeTab: Tab = 'cameras';
   let nowMs = Date.now();
   let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
 
@@ -65,6 +68,10 @@
     } finally {
       observingGo2rtc = false;
     }
+  }
+
+  function configuredCameras() {
+    return (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   }
 
   function displayName(camera: DiscoveredCamera) {
@@ -181,22 +188,67 @@
 </svelte:head>
 
 <main class="shell" aria-label="Patrol home">
-  <section class="hero" aria-labelledby="page-title">
-    <p class="eyebrow">Camera Setup</p>
-    <h1 id="page-title">Patrol</h1>
-    <p class="summary">
-      Discover ONVIF cameras on the local network and prepare them for Patrol configuration.
-    </p>
-  </section>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Patrol</p>
+      <h1>
+        {activeTab === 'cameras' ? 'Cameras' : activeTab === 'settings' ? 'Settings' : 'System Health'}
+      </h1>
+    </div>
+    {#if discoveryState?.lastDiscovery}
+      <p class="topbar-meta">{discoveryState.devices.length} known</p>
+    {/if}
+  </header>
 
-  <section class="panel" aria-labelledby="discovery-title">
-    <div class="panel-header">
-      <div>
-        <h2 id="discovery-title">Camera Discovery</h2>
-        <p>Uses ONVIF WS-Discovery from the Patrol server process.</p>
-        <p class="event-path">Events append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
-      </div>
-      <div class="panel-actions">
+  {#if error}
+    <p class="notice error" role="alert">{error}</p>
+  {/if}
+
+  {#if activeTab === 'cameras'}
+    <section class="view" aria-labelledby="cameras-title">
+      <h2 id="cameras-title" class="sr-only">Camera streams</h2>
+
+      {#if configuredCameras().length > 0}
+        <ul class="camera-grid" aria-label="Configured camera streams">
+          {#each configuredCameras() as camera}
+            <li class="camera-tile">
+              <iframe
+                src={go2rtcStreamPath(camera, 'sub')}
+                title={`${displayName(camera)} go2rtc preview`}
+                data-testid="camera-preview-frame"
+              ></iframe>
+              <div class="camera-tile-footer">
+                <div>
+                  <h3>{displayName(camera)}</h3>
+                  <p>{camera.remoteAddress}</p>
+                </div>
+                <a
+                  href={cameraPath(camera)}
+                  aria-label={`Open high-resolution live view for ${displayName(camera)}`}
+                  data-testid="camera-preview-link"
+                >
+                  Open
+                </a>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <section class="empty-state" aria-label="No configured cameras">
+          <h2>No configured cameras</h2>
+          <p>Use Settings to discover cameras and save credentials before live views appear here.</p>
+          <button type="button" disabled={!hydrated} onclick={() => (activeTab = 'settings')}>Open Settings</button>
+        </section>
+      {/if}
+    </section>
+  {:else if activeTab === 'settings'}
+    <section class="view" aria-labelledby="settings-title">
+      <div class="section-header">
+        <div>
+          <h2 id="settings-title">Discovery & Configuration</h2>
+          <p>Find ONVIF cameras, open first-time setup, and save credentials for Patrol.</p>
+          <p class="event-path">Events append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
+        </div>
         <button
           type="button"
           onclick={discoverCameras}
@@ -206,177 +258,227 @@
         >
           {discovering ? 'Scanning...' : 'Discover'}
         </button>
+      </div>
+
+      {#if discoveryState?.lastDiscovery}
+        <div class="status" aria-live="polite">
+          <span>
+            {discoveryState.devices.length} camera{discoveryState.devices.length === 1 ? '' : 's'} found
+          </span>
+          <span>{discoveryState.lastDiscovery.durationMs} ms</span>
+          <span>Last discovery {timeAgo(discoveryState.lastDiscovery.completedAtMs, nowMs)} ago</span>
+          <span>Showing cameras seen in the last {formatWindow(discoveryState.staleAfterMs)}</span>
+          <span>Event replayed</span>
+        </div>
+
+        {#if discoveryState.errors.length > 0}
+          <ul class="notice error-list" aria-label="Discovery errors">
+            {#each discoveryState.errors as discoveryError}
+              <li>{discoveryError}</li>
+            {/each}
+          </ul>
+        {/if}
+
+        {#if discoveryState.devices.length > 0}
+          <ul class="settings-list" aria-label="Discovered cameras">
+            {#each discoveryState.devices as camera}
+              <li class="settings-card">
+                <div class="settings-card-header">
+                  <div>
+                    <h3>{displayName(camera)}</h3>
+                    <p>{camera.remoteAddress}</p>
+                    <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs, nowMs)} ago</p>
+                  </div>
+                  <a href={camera.setupUrl} target="_blank" rel="noreferrer">Open camera setup</a>
+                </div>
+
+                <dl>
+                  <div>
+                    <dt>Vendor</dt>
+                    <dd>{camera.vendorHint ?? 'Unknown from ONVIF discovery'}</dd>
+                  </div>
+                  <div>
+                    <dt>Hardware</dt>
+                    <dd>{camera.hardware ?? 'Unknown'}</dd>
+                  </div>
+                  <div>
+                    <dt>Endpoint</dt>
+                    <dd>{camera.endpoint ?? 'Unknown'}</dd>
+                  </div>
+                  <div>
+                    <dt>XAddrs</dt>
+                    <dd>{camera.xaddrs.join(', ') || 'None reported'}</dd>
+                  </div>
+                </dl>
+
+                <form class="credentials-form" onsubmit={(event) => saveCredentials(camera, event)}>
+                  <label>
+                    <span>Username for {displayName(camera)}</span>
+                    <input name="username" autocomplete="username" required />
+                  </label>
+                  <label>
+                    <span>Password for {displayName(camera)}</span>
+                    <input name="password" type="password" autocomplete="current-password" required />
+                  </label>
+                  <button
+                    type="submit"
+                    class="secondary"
+                    disabled={credentialStatus[camera.id]?.state === 'saving'}
+                  >
+                    {credentialStatus[camera.id]?.state === 'saving' ? 'Saving...' : 'Save credentials'}
+                  </button>
+                </form>
+
+                {#if camera.credentials}
+                  <p class="credential-status success" role="status">
+                    Credentials saved {timeAgo(camera.credentials.savedAtMs, nowMs)} ago.
+                  </p>
+                {/if}
+
+                {#if credentialStatus[camera.id]}
+                  <p
+                    class:error={credentialStatus[camera.id].state === 'error'}
+                    class:success={credentialStatus[camera.id].state === 'saved'}
+                    class="credential-status"
+                    role="status"
+                  >
+                    {credentialStatus[camera.id].message}
+                  </p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="notice">No cameras responded to the ONVIF discovery probe.</p>
+        {/if}
+      {:else}
+        <p class="notice">Run discovery to find cameras on the local network.</p>
+      {/if}
+    </section>
+  {:else}
+    <section class="view" aria-labelledby="health-title">
+      <div class="section-header">
+        <div>
+          <h2 id="health-title">Monitoring</h2>
+          <p>Observe go2rtc and reduce the latest stream facts into system health.</p>
+        </div>
         <button
           type="button"
-          class="secondary"
           onclick={observeGo2rtc}
           disabled={observingGo2rtc || !hydrated}
           aria-busy={observingGo2rtc}
           data-testid="observe-go2rtc"
         >
-          {observingGo2rtc ? 'Observing...' : 'Observe streams'}
+          {observingGo2rtc ? 'Observing...' : 'Observe'}
         </button>
       </div>
-    </div>
 
-    {#if error}
-      <p class="notice error" role="alert">{error}</p>
-    {:else if discoveryState?.lastDiscovery}
-      <div class="status" aria-live="polite">
-        <span>
-          {discoveryState.devices.length} camera{discoveryState.devices.length === 1 ? '' : 's'} found
-        </span>
-        <span>{discoveryState.lastDiscovery.durationMs} ms</span>
-        <span>Last discovery {timeAgo(discoveryState.lastDiscovery.completedAtMs, nowMs)} ago</span>
-        <span>Showing cameras seen in the last {formatWindow(discoveryState.staleAfterMs)}</span>
-        <span>Event replayed</span>
-      </div>
-
-      {#if discoveryState.errors.length > 0}
-        <ul class="notice error-list" aria-label="Discovery errors">
-          {#each discoveryState.errors as discoveryError}
-            <li>{discoveryError}</li>
-          {/each}
-        </ul>
-      {/if}
-
-      {#if discoveryState.devices.length > 0}
-        <ul class="camera-list" aria-label="Discovered cameras">
+      {#if discoveryState?.devices.length}
+        <ul class="health-list" aria-label="Camera health">
           {#each discoveryState.devices as camera}
-            <li class="camera-card">
-              <div>
-                <h3>{displayName(camera)}</h3>
-                <p>{camera.remoteAddress}</p>
-                <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs, nowMs)} ago</p>
-              </div>
-
-              {#if camera.credentials}
-                <div class="camera-preview">
-                  <iframe
-                    src={go2rtcStreamPath(camera, 'sub')}
-                    title={`${displayName(camera)} go2rtc preview`}
-                    data-testid="camera-preview-frame"
-                  ></iframe>
-                  <a
-                    href={cameraPath(camera)}
-                    aria-label={`Open live view for ${displayName(camera)}`}
-                    data-testid="camera-preview-link"
-                  >
-                    Open high-resolution live view
-                  </a>
+            <li class="health-card">
+              <div class="health-card-header">
+                <div>
+                  <h3>{displayName(camera)}</h3>
+                  <p>{camera.remoteAddress}</p>
                 </div>
-
                 {#if camera.go2rtc}
-                  <div
-                    class="go2rtc-status"
-                    data-health={camera.go2rtc.health}
-                    data-testid="go2rtc-camera-status"
-                  >
-                    <p>
-                      go2rtc {healthLabel(camera.go2rtc.health)}
-                      {#if camera.go2rtc.observedAtMs}
-                        · observed {timeAgo(camera.go2rtc.observedAtMs, nowMs)} ago
-                      {/if}
-                    </p>
-                    <ul>
-                      <li>
-                        Main {healthLabel(camera.go2rtc.streams.main.health)}:
-                        {camera.go2rtc.streams.main.producerCount} producer{camera.go2rtc.streams.main.producerCount === 1 ? '' : 's'},
-                        {camera.go2rtc.streams.main.consumerCount} consumer{camera.go2rtc.streams.main.consumerCount === 1 ? '' : 's'}
-                      </li>
-                      <li>
-                        Sub {healthLabel(camera.go2rtc.streams.sub.health)}:
-                        {camera.go2rtc.streams.sub.producerCount} producer{camera.go2rtc.streams.sub.producerCount === 1 ? '' : 's'},
-                        {camera.go2rtc.streams.sub.consumerCount} consumer{camera.go2rtc.streams.sub.consumerCount === 1 ? '' : 's'}
-                      </li>
-                    </ul>
-                  </div>
+                  <span class="health-pill" data-health={camera.go2rtc.health}>
+                    {healthLabel(camera.go2rtc.health)}
+                  </span>
                 {:else}
-                  <p class="go2rtc-missing" data-testid="go2rtc-camera-status">
-                    go2rtc has not materialized stream configuration for this camera yet.
-                  </p>
+                  <span class="health-pill" data-health="offline">unconfigured</span>
                 {/if}
-              {/if}
-
-              <dl>
-                <div>
-                  <dt>Vendor</dt>
-                  <dd>{camera.vendorHint ?? 'Unknown from ONVIF discovery'}</dd>
-                </div>
-                <div>
-                  <dt>Hardware</dt>
-                  <dd>{camera.hardware ?? 'Unknown'}</dd>
-                </div>
-                <div>
-                  <dt>Endpoint</dt>
-                  <dd>{camera.endpoint ?? 'Unknown'}</dd>
-                </div>
-                <div>
-                  <dt>XAddrs</dt>
-                  <dd>{camera.xaddrs.join(', ') || 'None reported'}</dd>
-                </div>
-              </dl>
-
-              <div class="setup-actions">
-                <a href={camera.setupUrl} target="_blank" rel="noreferrer">
-                  Open camera setup
-                </a>
-                <p>
-                  Use this link for first-time camera setup, then enter the camera credentials
-                  Patrol should use.
-                </p>
               </div>
 
-              <form class="credentials-form" onsubmit={(event) => saveCredentials(camera, event)}>
-                <label>
-                  <span>Username for {displayName(camera)}</span>
-                  <input name="username" autocomplete="username" required />
-                </label>
-                <label>
-                  <span>Password for {displayName(camera)}</span>
-                  <input name="password" type="password" autocomplete="current-password" required />
-                </label>
-                <button
-                  type="submit"
-                  class="secondary"
-                  disabled={credentialStatus[camera.id]?.state === 'saving'}
-                >
-                  {credentialStatus[camera.id]?.state === 'saving' ? 'Saving...' : 'Save credentials'}
-                </button>
-              </form>
-
-              {#if camera.credentials}
-                <p class="credential-status success" role="status">
-                  Credentials saved {timeAgo(camera.credentials.savedAtMs, nowMs)} ago.
-                </p>
-              {/if}
-
-              {#if credentialStatus[camera.id]}
-                <p
-                  class:error={credentialStatus[camera.id].state === 'error'}
-                  class:success={credentialStatus[camera.id].state === 'saved'}
-                  class="credential-status"
-                  role="status"
-                >
-                  {credentialStatus[camera.id].message}
+              {#if camera.go2rtc}
+                <div class="go2rtc-status" data-health={camera.go2rtc.health} data-testid="go2rtc-camera-status">
+                  <p>
+                    go2rtc {healthLabel(camera.go2rtc.health)}
+                    {#if camera.go2rtc.observedAtMs}
+                      · observed {timeAgo(camera.go2rtc.observedAtMs, nowMs)} ago
+                    {/if}
+                  </p>
+                  <ul>
+                    <li>
+                      Main {healthLabel(camera.go2rtc.streams.main.health)}:
+                      {camera.go2rtc.streams.main.producerCount} producer{camera.go2rtc.streams.main.producerCount === 1 ? '' : 's'},
+                      {camera.go2rtc.streams.main.consumerCount} consumer{camera.go2rtc.streams.main.consumerCount === 1 ? '' : 's'}
+                    </li>
+                    <li>
+                      Sub {healthLabel(camera.go2rtc.streams.sub.health)}:
+                      {camera.go2rtc.streams.sub.producerCount} producer{camera.go2rtc.streams.sub.producerCount === 1 ? '' : 's'},
+                      {camera.go2rtc.streams.sub.consumerCount} consumer{camera.go2rtc.streams.sub.consumerCount === 1 ? '' : 's'}
+                    </li>
+                  </ul>
+                </div>
+              {:else}
+                <p class="notice compact" data-testid="go2rtc-camera-status">
+                  go2rtc has not materialized stream configuration for this camera yet.
                 </p>
               {/if}
             </li>
           {/each}
         </ul>
       {:else}
-        <p class="notice">No cameras responded to the ONVIF discovery probe.</p>
+        <p class="notice">No camera state has been replayed yet.</p>
       {/if}
-    {:else}
-      <p class="notice">Run discovery to find cameras on the local network.</p>
-    {/if}
-  </section>
+    </section>
+  {/if}
 </main>
+
+<nav class="tabbar" aria-label="Primary">
+  <button
+    type="button"
+    class:active={activeTab === 'cameras'}
+    aria-label="Cameras"
+    aria-current={activeTab === 'cameras' ? 'page' : undefined}
+    data-testid="tab-cameras"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'cameras')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h12v10H4z"></path>
+      <path d="m16 10 4-2v8l-4-2z"></path>
+    </svg>
+    <span>Cameras</span>
+  </button>
+  <button
+    type="button"
+    class:active={activeTab === 'settings'}
+    aria-label="Settings"
+    aria-current={activeTab === 'settings' ? 'page' : undefined}
+    data-testid="tab-settings"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'settings')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"></path>
+    </svg>
+    <span>Settings</span>
+  </button>
+  <button
+    type="button"
+    class:active={activeTab === 'health'}
+    aria-label="System health"
+    aria-current={activeTab === 'health' ? 'page' : undefined}
+    data-testid="tab-health"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'health')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 13h4l2-6 4 10 2-4h4"></path>
+      <path d="M4 19h16"></path>
+    </svg>
+    <span>Health</span>
+  </button>
+</nav>
 
 <style>
   :global(body) {
     margin: 0;
-    background: #f7f7f4;
+    background: #f4f5f2;
     color: #171a1f;
     font-family:
       Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -386,19 +488,29 @@
   .shell {
     box-sizing: border-box;
     min-height: 100vh;
-    padding: 32px;
+    padding: 18px 16px 104px;
   }
 
-  .hero {
-    margin: 0 auto 24px;
-    max-width: 920px;
+  .topbar,
+  .view {
+    box-sizing: border-box;
+    margin: 0 auto;
+    max-width: 1120px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
   }
 
   .eyebrow {
-    margin: 0 0 8px;
-    color: #52606d;
-    font-size: 0.8rem;
-    font-weight: 700;
+    margin: 0 0 4px;
+    color: #66727f;
+    font-size: 0.78rem;
+    font-weight: 750;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -411,9 +523,9 @@
   }
 
   h1 {
-    margin-bottom: 8px;
-    font-size: 2rem;
-    font-weight: 650;
+    margin-bottom: 0;
+    font-size: 1.65rem;
+    font-weight: 700;
     letter-spacing: 0;
   }
 
@@ -427,43 +539,29 @@
     font-size: 0.95rem;
   }
 
-  .summary {
-    max-width: 620px;
-    color: #52606d;
-    line-height: 1.5;
+  .topbar-meta {
+    margin-bottom: 2px;
+    color: #66727f;
+    font-size: 0.88rem;
   }
 
-  .panel {
-    box-sizing: border-box;
-    margin: 0 auto;
-    max-width: 920px;
-    border: 1px solid #d5d8dc;
+  .section-header {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 16px;
+    border: 1px solid #d9dde2;
     border-radius: 8px;
     background: #ffffff;
-    padding: 20px;
+    padding: 16px;
   }
 
-  .panel-header {
-    display: flex;
-    gap: 16px;
-    align-items: flex-start;
-    justify-content: space-between;
-  }
-
-  .panel-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: flex-end;
-  }
-
-  .panel-header p {
+  .section-header p {
     margin-bottom: 0;
     color: #66727f;
     line-height: 1.4;
   }
 
-  .panel-header .event-path {
+  .event-path {
     margin-top: 6px;
     font-size: 0.85rem;
   }
@@ -472,177 +570,24 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   }
 
-  button {
-    min-width: 104px;
+  button,
+  .camera-tile-footer a,
+  .settings-card-header a {
     border: 1px solid #1f2937;
     border-radius: 6px;
     background: #1f2937;
     color: #ffffff;
     cursor: pointer;
     font: inherit;
-    font-weight: 650;
+    font-weight: 700;
     padding: 9px 14px;
-  }
-
-  a {
-    color: #1f4f82;
-    font-weight: 650;
+    text-align: center;
+    text-decoration: none;
   }
 
   button:disabled {
     cursor: wait;
     opacity: 0.65;
-  }
-
-  .status {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 18px;
-  }
-
-  .status span {
-    border: 1px solid #d5d8dc;
-    border-radius: 999px;
-    padding: 4px 10px;
-    color: #3d4752;
-    font-size: 0.85rem;
-  }
-
-  .notice {
-    margin: 18px 0 0;
-    color: #52606d;
-  }
-
-  .error {
-    color: #9f1d1d;
-  }
-
-  .error-list {
-    padding-left: 20px;
-  }
-
-  .camera-list {
-    display: grid;
-    gap: 12px;
-    margin: 18px 0 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .camera-card {
-    border: 1px solid #e2e5e9;
-    border-radius: 8px;
-    padding: 16px;
-  }
-
-  .camera-card p {
-    margin-bottom: 12px;
-    color: #66727f;
-  }
-
-  .camera-preview {
-    display: grid;
-    gap: 8px;
-    margin-bottom: 16px;
-  }
-
-  .camera-preview iframe {
-    display: block;
-    width: 100%;
-    aspect-ratio: 16 / 9;
-    border: 1px solid #d5d8dc;
-    border-radius: 6px;
-    background: #111827;
-  }
-
-  .camera-preview a {
-    font-size: 0.9rem;
-    font-weight: 650;
-  }
-
-  .go2rtc-status,
-  .go2rtc-missing {
-    margin: 0 0 16px;
-    border: 1px solid #d5d8dc;
-    border-radius: 6px;
-    background: #f9fafb;
-    padding: 10px 12px;
-  }
-
-  .go2rtc-status[data-health="streaming"],
-  .go2rtc-status[data-health="ready"] {
-    border-color: #9bc4ad;
-    background: #f2fbf5;
-  }
-
-  .go2rtc-status[data-health="partial"] {
-    border-color: #dfc979;
-    background: #fff9e8;
-  }
-
-  .go2rtc-status[data-health="offline"] {
-    border-color: #dfa6a6;
-    background: #fff5f5;
-  }
-
-  .go2rtc-status p,
-  .go2rtc-missing {
-    color: #3d4752;
-  }
-
-  .go2rtc-status p {
-    margin-bottom: 6px;
-    font-weight: 650;
-  }
-
-  .go2rtc-status ul {
-    display: grid;
-    gap: 4px;
-    margin: 0;
-    padding-left: 18px;
-    color: #52606d;
-    font-size: 0.88rem;
-  }
-
-  .setup-actions {
-    display: grid;
-    gap: 6px;
-    margin-top: 16px;
-    border-top: 1px solid #e2e5e9;
-    padding-top: 16px;
-  }
-
-  .setup-actions p {
-    margin-bottom: 0;
-  }
-
-  .credentials-form {
-    display: grid;
-    gap: 12px;
-    margin-top: 16px;
-  }
-
-  label {
-    display: grid;
-    gap: 6px;
-  }
-
-  label span {
-    color: #3d4752;
-    font-size: 0.85rem;
-    font-weight: 650;
-  }
-
-  input {
-    box-sizing: border-box;
-    width: 100%;
-    border: 1px solid #cbd1d8;
-    border-radius: 6px;
-    background: #ffffff;
-    color: #171a1f;
-    font: inherit;
-    padding: 9px 10px;
   }
 
   .secondary {
@@ -653,12 +598,106 @@
     color: #1f2937;
   }
 
-  .credential-status {
-    margin: 12px 0 0;
+  .camera-grid,
+  .settings-list,
+  .health-list {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 
-  .success {
-    color: #17683a;
+  .camera-tile,
+  .settings-card,
+  .health-card,
+  .empty-state {
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+  }
+
+  .camera-tile {
+    overflow: hidden;
+  }
+
+  .camera-tile iframe {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 0;
+    background: #111827;
+  }
+
+  .camera-tile-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .camera-tile-footer p,
+  .settings-card p,
+  .health-card p {
+    margin-bottom: 0;
+    color: #66727f;
+  }
+
+  .camera-tile-footer a {
+    min-width: 72px;
+  }
+
+  .empty-state {
+    display: grid;
+    gap: 10px;
+    padding: 18px;
+  }
+
+  .empty-state p {
+    margin-bottom: 0;
+    color: #66727f;
+    line-height: 1.45;
+  }
+
+  .empty-state button {
+    width: fit-content;
+  }
+
+  .status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 16px;
+  }
+
+  .status span {
+    border: 1px solid #d5d8dc;
+    border-radius: 999px;
+    background: #ffffff;
+    padding: 4px 10px;
+    color: #3d4752;
+    font-size: 0.85rem;
+  }
+
+  .settings-card,
+  .health-card {
+    padding: 16px;
+  }
+
+  .settings-card-header,
+  .health-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .settings-card-header a {
+    border-color: #cbd1d8;
+    background: #ffffff;
+    color: #1f2937;
   }
 
   dl {
@@ -684,17 +723,202 @@
     overflow-wrap: anywhere;
   }
 
-  @media (max-width: 640px) {
+  .credentials-form {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+    border-top: 1px solid #e2e5e9;
+    padding-top: 16px;
+  }
+
+  label {
+    display: grid;
+    gap: 6px;
+  }
+
+  label span {
+    color: #3d4752;
+    font-size: 0.85rem;
+    font-weight: 650;
+  }
+
+  input {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid #cbd1d8;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #171a1f;
+    font: inherit;
+    padding: 9px 10px;
+  }
+
+  .credential-status {
+    margin: 12px 0 0;
+  }
+
+  .success {
+    color: #17683a;
+  }
+
+  .notice {
+    margin: 0 0 16px;
+    color: #52606d;
+  }
+
+  .compact {
+    margin-bottom: 0;
+  }
+
+  .error {
+    color: #9f1d1d;
+  }
+
+  .error-list {
+    padding-left: 20px;
+  }
+
+  .health-pill {
+    border: 1px solid #d5d8dc;
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: #3d4752;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  .health-pill[data-health="streaming"],
+  .health-pill[data-health="ready"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+    color: #17683a;
+  }
+
+  .health-pill[data-health="partial"] {
+    border-color: #dfc979;
+    background: #fff9e8;
+    color: #725d0d;
+  }
+
+  .health-pill[data-health="offline"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+    color: #9f1d1d;
+  }
+
+  .go2rtc-status {
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #f9fafb;
+    padding: 10px 12px;
+  }
+
+  .go2rtc-status[data-health="streaming"],
+  .go2rtc-status[data-health="ready"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+  }
+
+  .go2rtc-status[data-health="partial"] {
+    border-color: #dfc979;
+    background: #fff9e8;
+  }
+
+  .go2rtc-status[data-health="offline"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+  }
+
+  .go2rtc-status p {
+    margin-bottom: 6px;
+    color: #3d4752;
+    font-weight: 650;
+  }
+
+  .go2rtc-status ul {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: #52606d;
+    font-size: 0.88rem;
+  }
+
+  .tabbar {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    border-top: 1px solid #d5d8dc;
+    background: rgb(255 255 255 / 0.96);
+    padding: 8px max(8px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    box-shadow: 0 -8px 24px rgb(23 26 31 / 0.08);
+  }
+
+  .tabbar button {
+    display: grid;
+    justify-items: center;
+    gap: 3px;
+    min-width: 0;
+    border-color: transparent;
+    background: transparent;
+    color: #66727f;
+    padding: 6px 4px;
+  }
+
+  .tabbar button.active {
+    color: #171a1f;
+  }
+
+  .tabbar svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+  }
+
+  .tabbar span {
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
+  @media (min-width: 760px) {
     .shell {
-      padding: 20px;
+      padding: 28px 28px 112px;
     }
 
-    .panel-header {
-      display: grid;
+    .camera-grid {
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     }
 
-    button {
-      width: 100%;
+    .section-header {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+    }
+
+    .tabbar {
+      right: 50%;
+      left: 50%;
+      width: min(440px, calc(100% - 32px));
+      transform: translateX(-50%);
+      border: 1px solid #d5d8dc;
+      border-radius: 16px 16px 0 0;
     }
   }
 </style>

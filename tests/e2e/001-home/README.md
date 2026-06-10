@@ -1,21 +1,31 @@
 # Test: frontend serves Patrol camera discovery
 
-## Patrol camera discovery panel is visible
+## Patrol camera view is visible
 
-![Patrol camera discovery panel is visible](./screenshots/000-home-page.png)
+![Patrol camera view is visible](./screenshots/000-home-page.png)
 
 **Verifications:**
 - [x] Document title is Patrol
-- [x] Patrol heading is visible
+- [x] Cameras heading is visible
+- [x] Empty camera state points to settings
+- [x] Bottom tab buttons are available
+
+---
+
+## Discovery and configuration controls are in settings
+
+![Discovery and configuration controls are in settings](./screenshots/001-settings-tab.png)
+
+**Verifications:**
+- [x] Settings tab is selected
 - [x] Discovery button is visible
-- [x] go2rtc observation button is available
 - [x] Discovery event log path is shown
 
 ---
 
 ## Discovered camera is rendered
 
-![Discovered camera is rendered](./screenshots/001-discovered-camera.png)
+![Discovered camera is rendered](./screenshots/002-discovered-camera.png)
 
 **Verifications:**
 - [x] Camera count is shown
@@ -28,19 +38,38 @@
 
 ## Camera credentials are accepted
 
-![Camera credentials are accepted](./screenshots/002-credentials-saved.png)
+![Camera credentials are accepted](./screenshots/003-credentials-saved.png)
 
 **Verifications:**
 - [x] Credentials save status is shown
-- [x] Credentialed camera preview is shown through go2rtc
-- [x] go2rtc configuration is replayed from events
 - [x] Credential request includes camera identity and credentials
+
+---
+
+## Configured cameras show substream previews
+
+![Configured cameras show substream previews](./screenshots/004-camera-grid.png)
+
+**Verifications:**
+- [x] Cameras tab is selected
+- [x] Credentialed camera preview is shown through go2rtc
+
+---
+
+## go2rtc configuration status is in system health
+
+![go2rtc configuration status is in system health](./screenshots/005-health-tab-configured.png)
+
+**Verifications:**
+- [x] Health tab is selected
+- [x] go2rtc observation button is available
+- [x] go2rtc configuration is replayed from events
 
 ---
 
 ## go2rtc stream status is reduced from observed events
 
-![go2rtc stream status is reduced from observed events](./screenshots/003-go2rtc-observed.png)
+![go2rtc stream status is reduced from observed events](./screenshots/006-go2rtc-observed.png)
 
 **Verifications:**
 - [x] Camera streaming health is shown
@@ -50,7 +79,7 @@
 
 ## High-resolution live camera view is shown
 
-![High-resolution live camera view is shown](./screenshots/004-live-view.png)
+![High-resolution live camera view is shown](./screenshots/007-live-view.png)
 
 **Verifications:**
 - [x] Live camera route opens from the preview card
@@ -58,14 +87,22 @@
 
 ---
 
-## Timestamp labels refresh without reload
+## Settings timestamp labels refresh without reload
 
-![Timestamp labels refresh without reload](./screenshots/005-refreshed-times.png)
+![Settings timestamp labels refresh without reload](./screenshots/008-refreshed-times.png)
 
 **Verifications:**
 - [x] Last discovery age advances after one minute
 - [x] Camera discovery age advances after one minute
-- [x] go2rtc observed age advances after one minute
 - [x] Credential saved age advances after one minute
+
+---
+
+## Health timestamp labels refresh without reload
+
+![Health timestamp labels refresh without reload](./screenshots/009-health-refreshed-times.png)
+
+**Verifications:**
+- [x] go2rtc observed age advances after one minute
 
 ---
