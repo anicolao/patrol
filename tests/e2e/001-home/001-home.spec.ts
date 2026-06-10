@@ -9,9 +9,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   );
   tester.setMetadata('Patrol Camera Discovery', 'The SvelteKit frontend serves camera discovery.');
 
-  await page.addInitScript((nowMs) => {
-    Date.now = () => nowMs;
-  }, fixedNowMs);
+  await page.clock.install({ time: fixedNowMs });
 
   await page.route('**/api/cameras/discover', async (route) => {
     if (route.request().method() === 'GET') {
@@ -210,6 +208,11 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       }
     ]
   });
+
+  await page.clock.fastForward(60 * 1000);
+  await expect(page.getByText('Last discovery 3 minutes ago')).toBeVisible();
+  await expect(page.getByText('Discovered 2 minutes ago')).toBeVisible();
+  await expect(page.getByText('Credentials saved 1 minute ago.')).toBeVisible();
 
   tester.generateDocs();
 });

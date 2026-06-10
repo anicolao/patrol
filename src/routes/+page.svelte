@@ -52,8 +52,8 @@
     return camera.name ?? camera.hardware ?? camera.remoteAddress;
   }
 
-  function timeAgo(tsMs: number) {
-    const ageSeconds = Math.max(0, Math.floor((nowMs - tsMs) / 1000));
+  function timeAgo(tsMs: number, currentMs: number) {
+    const ageSeconds = Math.max(0, Math.floor((currentMs - tsMs) / 1000));
     if (ageSeconds < 60) {
       return `${ageSeconds} second${ageSeconds === 1 ? '' : 's'}`;
     }
@@ -166,7 +166,7 @@
           {discoveryState.devices.length} camera{discoveryState.devices.length === 1 ? '' : 's'} found
         </span>
         <span>{discoveryState.lastDiscovery.durationMs} ms</span>
-        <span>Last discovery {timeAgo(discoveryState.lastDiscovery.completedAtMs)} ago</span>
+        <span>Last discovery {timeAgo(discoveryState.lastDiscovery.completedAtMs, nowMs)} ago</span>
         <span>Showing cameras seen in the last {formatWindow(discoveryState.staleAfterMs)}</span>
         <span>Event replayed</span>
       </div>
@@ -186,7 +186,7 @@
               <div>
                 <h3>{displayName(camera)}</h3>
                 <p>{camera.remoteAddress}</p>
-                <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs)} ago</p>
+                <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs, nowMs)} ago</p>
               </div>
 
               <dl>
@@ -238,7 +238,7 @@
 
               {#if camera.credentials}
                 <p class="credential-status success" role="status">
-                  Credentials saved {timeAgo(camera.credentials.savedAtMs)} ago.
+                  Credentials saved {timeAgo(camera.credentials.savedAtMs, nowMs)} ago.
                 </p>
               {/if}
 
