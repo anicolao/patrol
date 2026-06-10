@@ -12,11 +12,17 @@ export interface DiscoveredCamera {
   vendorHint: string | null;
 }
 
-export interface CameraDiscoveryResult {
+export interface RawProbeResponse {
+  remoteAddress: string;
+  receivedAtMs: number;
+  body: string;
+}
+
+export interface CameraDiscoveryRawResult {
   protocol: 'onvif-ws-discovery';
   startedAtMs: number;
   durationMs: number;
-  devices: DiscoveredCamera[];
+  responses: RawProbeResponse[];
   errors: string[];
 }
 
