@@ -1,4 +1,6 @@
 import type {
+  AnnkeAiHealth,
+  AnnkeCameraAiStatus,
   CameraDiscoveryRawResult,
   CameraDiscoveryState,
   DiscoveredCamera,
@@ -59,6 +61,32 @@ export interface Go2rtcStreamsObservedPayload {
   };
 }
 
+export interface AnnkeAiObservationRequestedPayload {
+  cameraIds: string[];
+}
+
+export interface AnnkeIsapiResponseObservedPayload {
+  cameraId: string;
+  host: string;
+  path: string;
+  rawResult: {
+    startedAtMs: number;
+    durationMs: number;
+    ok: boolean;
+    statusCode: number | null;
+    body: string | null;
+    error: string | null;
+  };
+}
+
+export interface AnnkeAlertStreamMessageReceivedPayload {
+  cameraId: string;
+  host: string;
+  sourcePath: '/ISAPI/Event/notification/alertStream';
+  receivedAtMs: number;
+  rawXml: string;
+}
+
 export async function appendDiscoveryInitiated(runId: string) {
   return await appendEvent<DiscoveryInitiatedPayload>(CAMERA_STREAM, {
     type: 'camera.discovery.initiated',
@@ -105,6 +133,32 @@ export async function appendGo2rtcStreamsObserved(payload: Go2rtcStreamsObserved
   });
 }
 
+export async function appendAnnkeAiObservationRequested(payload: AnnkeAiObservationRequestedPayload) {
+  return await appendEvent<AnnkeAiObservationRequestedPayload>(CAMERA_STREAM, {
+    type: 'annke.ai.observation.requested',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendAnnkeIsapiResponseObserved(payload: AnnkeIsapiResponseObservedPayload) {
+  return await appendEvent<AnnkeIsapiResponseObservedPayload>(CAMERA_STREAM, {
+    type: 'annke.isapi.response.observed',
+    source: 'patrol-annke-observer',
+    payload
+  });
+}
+
+export async function appendAnnkeAlertStreamMessageReceived(
+  payload: AnnkeAlertStreamMessageReceivedPayload
+) {
+  return await appendEvent<AnnkeAlertStreamMessageReceivedPayload>(CAMERA_STREAM, {
+    type: 'annke.alert_stream.message_received',
+    source: 'patrol-annke-events',
+    payload
+  });
+}
+
 export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryState> {
   return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM));
 }
@@ -113,6 +167,7 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
   const devicesById = new Map<string, DiscoveredCamera>();
   const credentialsByCameraId = new Map<string, DiscoveredCamera['credentials']>();
   const go2rtcConfigsByCameraId = new Map<string, Go2rtcCameraConfig>();
+  const annkeStateByCameraId = new Map<string, AnnkeCameraAiReducerState>();
   let latestCompleted: PatrolEvent<DiscoveryCompletedPayload> | null = null;
   let latestGo2rtcObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null = null;
   const nowMs = Date.now();
@@ -149,6 +204,30 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
       continue;
     }
 
+    if (event.type === 'annke.isapi.response.observed') {
+      const observed = event as PatrolEvent<AnnkeIsapiResponseObservedPayload>;
+      const state = annkeStateByCameraId.get(observed.payload.cameraId) ?? {};
+      if (observed.payload.path === '/ISAPI/System/Video/inputs/channels/1/motionDetection') {
+        state.motionDetection = observed;
+      } else if (observed.payload.path === '/ISAPI/Smart/capabilities') {
+        state.smartCapabilities = observed;
+      } else if (observed.payload.path === '/ISAPI/System/deviceInfo') {
+        state.deviceInfo = observed;
+      }
+      annkeStateByCameraId.set(observed.payload.cameraId, state);
+      continue;
+    }
+
+    if (event.type === 'annke.alert_stream.message_received') {
+      const message = event as PatrolEvent<AnnkeAlertStreamMessageReceivedPayload>;
+      const state = annkeStateByCameraId.get(message.payload.cameraId) ?? {};
+      if (isAnnkeAiAlert(message.payload.rawXml)) {
+        state.lastAlert = message;
+      }
+      annkeStateByCameraId.set(message.payload.cameraId, state);
+      continue;
+    }
+
     if (event.type !== 'camera.discovery.completed') {
       continue;
     }
@@ -165,7 +244,8 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
       devicesById.set(device.id, {
         ...device,
         credentials: existing?.credentials ?? null,
-        go2rtc: existing?.go2rtc ?? null
+        go2rtc: existing?.go2rtc ?? null,
+        annke: existing?.annke ?? null
       });
     }
   }
@@ -191,7 +271,8 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
         go2rtcConfigsByCameraId.get(cameraId) ?? null,
         latestGo2rtcObservation,
         latestObservedStreams
-      )
+      ),
+      annke: buildAnnkeCameraAiStatus(annkeStateByCameraId.get(cameraId) ?? null)
     });
   }
 
@@ -247,8 +328,136 @@ function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {
     vendorHint: inferVendor(scopes, xaddrs),
     streams: streamNames(scopes, response.remoteAddress, id),
     credentials: null,
-    go2rtc: null
+    go2rtc: null,
+    annke: null
   };
+}
+
+interface AnnkeCameraAiReducerState {
+  deviceInfo?: PatrolEvent<AnnkeIsapiResponseObservedPayload>;
+  motionDetection?: PatrolEvent<AnnkeIsapiResponseObservedPayload>;
+  smartCapabilities?: PatrolEvent<AnnkeIsapiResponseObservedPayload>;
+  lastAlert?: PatrolEvent<AnnkeAlertStreamMessageReceivedPayload>;
+}
+
+function buildAnnkeCameraAiStatus(state: AnnkeCameraAiReducerState | null): AnnkeCameraAiStatus | null {
+  if (!state) {
+    return null;
+  }
+
+  const motion = state.motionDetection;
+  const smart = state.smartCapabilities;
+  const alert = state.lastAlert;
+  const motionXml = motion?.payload.rawResult.body ?? null;
+  const smartXml = smart?.payload.rawResult.body ?? null;
+  const alertXml = alert?.payload.rawXml ?? null;
+  const alertState = alertXml ? textForTag(alertXml, 'eventState') : null;
+  const motionEnabled = motionXml ? parseBooleanTag(motionXml, 'enabled') : null;
+  const targetTypes = motionXml ? parseTargetTypes(motionXml) : [];
+  const health = annkeHealth({
+    motionOk: motion?.payload.rawResult.ok ?? null,
+    motionEnabled,
+    targetTypes,
+    alertState,
+    hasAlert: Boolean(alert)
+  });
+
+  return {
+    observedAtMs: latestTimestamp([motion?.ts_ms, smart?.ts_ms, alert?.payload.receivedAtMs]),
+    health,
+    motionDetection: {
+      observedAtMs: motion?.ts_ms ?? null,
+      ok: motion?.payload.rawResult.ok ?? null,
+      enabled: motionEnabled,
+      targetTypes,
+      sensitivityLevel: motionXml ? parseNumberTag(motionXml, 'sensitivityLevel') : null
+    },
+    smartCapabilities: {
+      observedAtMs: smart?.ts_ms ?? null,
+      ok: smart?.payload.rawResult.ok ?? null,
+      faceDetect: smartXml ? parseBooleanTag(smartXml, 'isSupportFaceDetect') : null,
+      audioDetection: smartXml ? parseBooleanTag(smartXml, 'isSupportAudioDetection') : null,
+      sceneChangeDetection: smartXml ? parseBooleanTag(smartXml, 'isSupportSceneChangeDetection') : null
+    },
+    lastAlert: alert
+      ? {
+          receivedAtMs: alert.payload.receivedAtMs,
+          eventType: textForTag(alertXml ?? '', 'eventType'),
+          eventState: alertState,
+          eventDescription: textForTag(alertXml ?? '', 'eventDescription'),
+          targetType: textForTag(alertXml ?? '', 'targetType'),
+          channelName: textForTag(alertXml ?? '', 'channelName'),
+          cameraDateTime: textForTag(alertXml ?? '', 'dateTime')
+        }
+      : null
+  };
+}
+
+function annkeHealth(input: {
+  motionOk: boolean | null;
+  motionEnabled: boolean | null;
+  targetTypes: string[];
+  alertState: string | null;
+  hasAlert: boolean;
+}): AnnkeAiHealth {
+  if (input.motionOk === false) {
+    return 'error';
+  }
+
+  if (input.alertState === 'active') {
+    return 'alert_active';
+  }
+
+  if (input.hasAlert) {
+    return 'alert_idle';
+  }
+
+  if (input.motionEnabled && input.targetTypes.length > 0) {
+    return 'motion_enabled';
+  }
+
+  return 'unknown';
+}
+
+function isAnnkeAiAlert(xml: string) {
+  return textForTag(xml, 'eventType') === 'VMD' || Boolean(textForTag(xml, 'targetType'));
+}
+
+function latestTimestamp(values: Array<number | null | undefined>) {
+  const timestamps = values.filter((value): value is number => typeof value === 'number');
+  return timestamps.length > 0 ? Math.max(...timestamps) : null;
+}
+
+function parseTargetTypes(xml: string) {
+  const rawTargetTypes = textForTag(xml, 'targetType') ?? tagAttribute(xml, 'targetType', 'opt');
+  return rawTargetTypes ? rawTargetTypes.split(',').map((value) => value.trim()).filter(Boolean) : [];
+}
+
+function parseBooleanTag(xml: string, tagName: string) {
+  const value = textForTag(xml, tagName);
+  if (value === 'true') {
+    return true;
+  }
+  if (value === 'false') {
+    return false;
+  }
+  return null;
+}
+
+function parseNumberTag(xml: string, tagName: string) {
+  const value = textForTag(xml, tagName);
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function tagAttribute(xml: string, tagName: string, attributeName: string) {
+  const match = xml.match(
+    new RegExp(`<[^:>/]*:?${tagName}(?:\\s[^>]*)?\\s${attributeName}="([^"]*)"[^>]*>`, 'i')
+  );
+  return match ? decodeXml(match[1].trim()) : null;
 }
 
 interface Go2rtcCameraConfig {

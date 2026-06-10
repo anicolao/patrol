@@ -42,6 +42,13 @@
               node scripts/observe-go2rtc.mjs
             '';
           };
+          patrol-annke-events = pkgs.writeShellApplication {
+            name = "patrol-annke-events";
+            runtimeInputs = [ pkgs.nodejs_24 ];
+            text = ''
+              node scripts/observe-annke-events.mjs
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -51,6 +58,7 @@
               pkgs.git
               pkgs.go2rtc
               pkgs.nodejs_24
+              patrol-annke-events
               patrol-go2rtc-config
               patrol-go2rtc-observe
               patrol-go2rtc-start
