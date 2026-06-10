@@ -34,3 +34,14 @@
 - [x] Credential request includes camera identity and credentials
 
 ---
+
+## Timestamp labels refresh without reload
+
+![Timestamp labels refresh without reload](./screenshots/003-refreshed-times.png)
+
+**Verifications:**
+- [x] Last discovery age advances after one minute
+- [x] Camera discovery age advances after one minute
+- [x] Credential saved age advances after one minute
+
+---
