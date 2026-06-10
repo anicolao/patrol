@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { CameraDiscoveryResult, DiscoveredCamera } from '$lib/cameras/discovery';
+  import type { CameraDiscoveryState, DiscoveredCamera } from '$lib/cameras/discovery';
 
-  let result: CameraDiscoveryResult | null = null;
+  let discoveryState: CameraDiscoveryState | null = null;
   let error: string | null = null;
   let discovering = false;
   let hydrated = false;
@@ -10,7 +10,20 @@
 
   onMount(() => {
     hydrated = true;
+    void loadDiscoveryState();
   });
+
+  async function loadDiscoveryState() {
+    try {
+      const response = await fetch('/api/cameras/discover');
+      if (!response.ok) {
+        throw new Error(`Discovery state failed with HTTP ${response.status}`);
+      }
+      discoveryState = (await response.json()) as CameraDiscoveryState;
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    }
+  }
 
   async function discoverCameras() {
     discovering = true;
@@ -21,7 +34,7 @@
       if (!response.ok) {
         throw new Error(`Discovery failed with HTTP ${response.status}`);
       }
-      result = (await response.json()) as CameraDiscoveryResult;
+      discoveryState = (await response.json()) as CameraDiscoveryState;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
@@ -100,6 +113,7 @@
       <div>
         <h2 id="discovery-title">Camera Discovery</h2>
         <p>Uses ONVIF WS-Discovery from the Patrol server process.</p>
+        <p class="event-path">Events append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
       </div>
       <button
         type="button"
@@ -114,23 +128,26 @@
 
     {#if error}
       <p class="notice error" role="alert">{error}</p>
-    {:else if result}
+    {:else if discoveryState?.lastDiscovery}
       <div class="status" aria-live="polite">
-        <span>{result.devices.length} camera{result.devices.length === 1 ? '' : 's'} found</span>
-        <span>{result.durationMs} ms</span>
+        <span>
+          {discoveryState.devices.length} camera{discoveryState.devices.length === 1 ? '' : 's'} found
+        </span>
+        <span>{discoveryState.lastDiscovery.durationMs} ms</span>
+        <span>Event replayed</span>
       </div>
 
-      {#if result.errors.length > 0}
+      {#if discoveryState.errors.length > 0}
         <ul class="notice error-list" aria-label="Discovery errors">
-          {#each result.errors as discoveryError}
+          {#each discoveryState.errors as discoveryError}
             <li>{discoveryError}</li>
           {/each}
         </ul>
       {/if}
 
-      {#if result.devices.length > 0}
+      {#if discoveryState.devices.length > 0}
         <ul class="camera-list" aria-label="Discovered cameras">
-          {#each result.devices as camera}
+          {#each discoveryState.devices as camera}
             <li class="camera-card">
               <div>
                 <h3>{displayName(camera)}</h3>
@@ -287,6 +304,15 @@
     margin-bottom: 0;
     color: #66727f;
     line-height: 1.4;
+  }
+
+  .panel-header .event-path {
+    margin-top: 6px;
+    font-size: 0.85rem;
+  }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   }
 
   button {
