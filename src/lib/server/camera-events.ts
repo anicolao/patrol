@@ -7,6 +7,7 @@ import type {
 import { appendEvent, readEvents, type PatrolEvent } from '$lib/server/event-store';
 
 const CAMERA_STREAM = 'cameras';
+const DISCOVERY_STALE_AFTER_MS = 60 * 60 * 1000;
 
 interface DiscoveryInitiatedPayload {
   protocol: 'onvif-ws-discovery';
@@ -14,6 +15,16 @@ interface DiscoveryInitiatedPayload {
 
 interface DiscoveryCompletedPayload {
   rawResult: CameraDiscoveryRawResult;
+}
+
+interface CameraCredentialsSavedPayload {
+  cameraId: string;
+  host: string;
+  secretIds: {
+    username: string;
+    password: string;
+  };
+  secretStoredAtMs: number;
 }
 
 export async function appendDiscoveryInitiated(runId: string) {
@@ -38,15 +49,35 @@ export async function appendDiscoveryCompleted(runId: string, rawResult: CameraD
   });
 }
 
+export async function appendCameraCredentialsSaved(payload: CameraCredentialsSavedPayload) {
+  return await appendEvent<CameraCredentialsSavedPayload>(CAMERA_STREAM, {
+    type: 'camera.credentials.saved',
+    source: 'patrol-web',
+    payload
+  });
+}
+
 export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryState> {
   return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM));
 }
 
 export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscoveryState {
   const devicesById = new Map<string, DiscoveredCamera>();
+  const credentialsByCameraId = new Map<string, DiscoveredCamera['credentials']>();
   let latestCompleted: PatrolEvent<DiscoveryCompletedPayload> | null = null;
+  const nowMs = Date.now();
 
   for (const event of events) {
+    if (event.type === 'camera.credentials.saved') {
+      const saved = event as PatrolEvent<CameraCredentialsSavedPayload>;
+      credentialsByCameraId.set(saved.payload.cameraId, {
+        savedAtMs: saved.ts_ms,
+        usernameSecretId: saved.payload.secretIds.username,
+        passwordSecretId: saved.payload.secretIds.password
+      });
+      continue;
+    }
+
     if (event.type !== 'camera.discovery.completed') {
       continue;
     }
@@ -59,12 +90,27 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
     latestCompleted = completed;
 
     for (const device of dedupeDevices(rawResult.responses.map(parseProbeResponse))) {
-      devicesById.set(device.id, device);
+      const existing = devicesById.get(device.id);
+      devicesById.set(device.id, {
+        ...device,
+        credentials: existing?.credentials ?? null
+      });
+    }
+  }
+
+  for (const [cameraId, credentials] of credentialsByCameraId) {
+    const device = devicesById.get(cameraId);
+    if (device) {
+      devicesById.set(cameraId, {
+        ...device,
+        credentials
+      });
     }
   }
 
   if (!latestCompleted) {
     return {
+      staleAfterMs: DISCOVERY_STALE_AFTER_MS,
       devices: [],
       errors: [],
       lastDiscovery: null
@@ -73,11 +119,14 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
 
   const rawResult = latestCompleted.payload.rawResult;
   return {
-    devices: Array.from(devicesById.values()).sort((a, b) => {
-      const left = a.name ?? a.remoteAddress;
-      const right = b.name ?? b.remoteAddress;
-      return left.localeCompare(right);
-    }),
+    staleAfterMs: DISCOVERY_STALE_AFTER_MS,
+    devices: Array.from(devicesById.values())
+      .filter((device) => nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
+      .sort((a, b) => {
+        const left = a.name ?? a.remoteAddress;
+        const right = b.name ?? b.remoteAddress;
+        return left.localeCompare(right);
+      }),
     errors: rawResult.errors,
     lastDiscovery: {
       runId: latestCompleted.correlation_id ?? latestCompleted.id,
@@ -100,6 +149,7 @@ function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {
     id,
     endpoint,
     remoteAddress: response.remoteAddress,
+    lastSeenAtMs: response.receivedAtMs,
     xaddrs,
     setupUrl: setupUrl(response.remoteAddress),
     scopes,
@@ -107,7 +157,8 @@ function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {
     name: scopeValue(scopes, '/name/'),
     hardware: scopeValue(scopes, '/hardware/'),
     location: scopeValue(scopes, '/location/'),
-    vendorHint: inferVendor(scopes, xaddrs)
+    vendorHint: inferVendor(scopes, xaddrs),
+    credentials: null
   };
 }
 

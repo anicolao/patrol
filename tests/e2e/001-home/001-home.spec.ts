@@ -2,17 +2,23 @@ import { expect, test } from '@playwright/test';
 import { TestStepHelper } from '../helpers/test-step-helper';
 
 test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
+  const fixedNowMs = 1781099200000;
   const tester = new TestStepHelper(
     page,
     testInfo
   );
   tester.setMetadata('Patrol Camera Discovery', 'The SvelteKit frontend serves camera discovery.');
 
+  await page.addInitScript((nowMs) => {
+    Date.now = () => nowMs;
+  }, fixedNowMs);
+
   await page.route('**/api/cameras/discover', async (route) => {
     if (route.request().method() === 'GET') {
       await route.fulfill({
         contentType: 'application/json',
         body: JSON.stringify({
+          staleAfterMs: 60 * 60 * 1000,
           devices: [],
           errors: [],
           lastDiscovery: null
@@ -24,19 +30,21 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
+        staleAfterMs: 60 * 60 * 1000,
         errors: [],
         lastDiscovery: {
           runId: 'discovery-run-1',
           protocol: 'onvif-ws-discovery',
-          startedAtMs: 1781099112345,
+          startedAtMs: fixedNowMs - 120042,
           durationMs: 42,
-          completedAtMs: 1781099112387
+          completedAtMs: fixedNowMs - 120000
         },
         devices: [
           {
             id: 'uuid:driveway-camera',
             endpoint: 'uuid:driveway-camera',
             remoteAddress: '10.20.240.193',
+            lastSeenAtMs: fixedNowMs - 90000,
             xaddrs: ['http://10.20.240.193/onvif/device_service'],
             setupUrl: 'http://10.20.240.193',
             scopes: [
@@ -47,7 +55,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             name: 'driveway',
             hardware: 'Annke C800',
             location: null,
-            vendorHint: 'annke'
+            vendorHint: 'annke',
+            credentials: null
           }
         ]
       })
@@ -59,13 +68,39 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        cameraId: 'uuid:driveway-camera',
-        host: '10.20.240.193',
-        storedAtMs: 1781099112445,
-        secretIds: {
-          username: 'camera.uuid:driveway-camera.username',
-          password: 'camera.uuid:driveway-camera.password'
-        }
+        staleAfterMs: 60 * 60 * 1000,
+        errors: [],
+        lastDiscovery: {
+          runId: 'discovery-run-1',
+          protocol: 'onvif-ws-discovery',
+          startedAtMs: fixedNowMs - 120042,
+          durationMs: 42,
+          completedAtMs: fixedNowMs - 120000
+        },
+        devices: [
+          {
+            id: 'uuid:driveway-camera',
+            endpoint: 'uuid:driveway-camera',
+            remoteAddress: '10.20.240.193',
+            lastSeenAtMs: fixedNowMs - 90000,
+            xaddrs: ['http://10.20.240.193/onvif/device_service'],
+            setupUrl: 'http://10.20.240.193',
+            scopes: [
+              'onvif://www.onvif.org/name/driveway',
+              'onvif://www.onvif.org/hardware/Annke%20C800'
+            ],
+            types: ['dn:NetworkVideoTransmitter'],
+            name: 'driveway',
+            hardware: 'Annke C800',
+            location: null,
+            vendorHint: 'annke',
+            credentials: {
+              savedAtMs: fixedNowMs - 30000,
+              usernameSecretId: 'camera.uuid:driveway-camera.username',
+              passwordSecretId: 'camera.uuid:driveway-camera.password'
+            }
+          }
+        ]
       })
     });
   });
@@ -129,6 +164,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
+        spec: 'Discovery age is shown',
+        check: async () => {
+          await expect(page.getByText('Last discovery 2 minutes ago')).toBeVisible();
+          await expect(page.getByText('Discovered 1 minute ago')).toBeVisible();
+        }
+      },
+      {
         spec: 'First-time setup link opens camera web UI',
         check: async () => {
           await expect(page.getByRole('link', { name: 'Open camera setup' })).toHaveAttribute(
@@ -151,7 +193,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       {
         spec: 'Credentials save status is shown',
         check: async () => {
-          await expect(page.getByText('Credentials saved to the local secrets log.')).toBeVisible();
+          await expect(page.getByText('Credentials saved to event logs.')).toBeVisible();
+          await expect(page.getByText('Credentials saved 30 seconds ago.')).toBeVisible();
         }
       },
       {

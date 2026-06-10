@@ -2,6 +2,7 @@ export interface DiscoveredCamera {
   id: string;
   endpoint: string | null;
   remoteAddress: string;
+  lastSeenAtMs: number;
   xaddrs: string[];
   setupUrl: string;
   scopes: string[];
@@ -10,6 +11,11 @@ export interface DiscoveredCamera {
   hardware: string | null;
   location: string | null;
   vendorHint: string | null;
+  credentials: {
+    savedAtMs: number;
+    usernameSecretId: string;
+    passwordSecretId: string;
+  } | null;
 }
 
 export interface RawProbeResponse {
@@ -27,6 +33,7 @@ export interface CameraDiscoveryRawResult {
 }
 
 export interface CameraDiscoveryState {
+  staleAfterMs: number;
   devices: DiscoveredCamera[];
   errors: string[];
   lastDiscovery: {
