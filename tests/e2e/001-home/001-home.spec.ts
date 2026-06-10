@@ -210,9 +210,30 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   });
 
   await page.clock.fastForward(60 * 1000);
-  await expect(page.getByText('Last discovery 3 minutes ago')).toBeVisible();
-  await expect(page.getByText('Discovered 2 minutes ago')).toBeVisible();
-  await expect(page.getByText('Credentials saved 1 minute ago.')).toBeVisible();
+  await tester.step('refreshed-times', {
+    description: 'Timestamp labels refresh without reload',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'Last discovery age advances after one minute',
+        check: async () => {
+          await expect(page.getByText('Last discovery 3 minutes ago')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Camera discovery age advances after one minute',
+        check: async () => {
+          await expect(page.getByText('Discovered 2 minutes ago')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Credential saved age advances after one minute',
+        check: async () => {
+          await expect(page.getByText('Credentials saved 1 minute ago.')).toBeVisible();
+        }
+      }
+    ]
+  });
 
   tester.generateDocs();
 });

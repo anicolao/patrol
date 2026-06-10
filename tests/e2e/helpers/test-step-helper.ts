@@ -79,17 +79,16 @@ export class TestStepHelper {
 
   generateDocs() {
     const docPath = path.join(path.dirname(this.testInfo.file), 'README.md');
-    let content = `# Test: ${this.testInfo.title}\n\n`;
-
-    for (const step of this.steps) {
-      content += `## ${step.title}\n\n`;
-      content += `![${step.title}](${step.image})\n\n`;
-      content += '**Verifications:**\n';
-      for (const spec of step.specs) {
-        content += `- [x] ${spec}\n`;
-      }
-      content += '\n---\n\n';
-    }
+    const sections = this.steps.map((step) => {
+      const specs = step.specs.map((spec) => `- [x] ${spec}`).join('\n');
+      return [
+        `## ${step.title}`,
+        `![${step.title}](${step.image})`,
+        `**Verifications:**\n${specs}`,
+        '---'
+      ].join('\n\n');
+    });
+    const content = [`# Test: ${this.testInfo.title}`, ...sections].join('\n\n') + '\n';
 
     fs.writeFileSync(docPath, content);
   }
