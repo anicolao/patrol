@@ -6,6 +6,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   const fixedNowMs = 1781099200000;
   const emptyDiscoveryState: CameraDiscoveryState = {
     staleAfterMs: 60 * 60 * 1000,
+    processes: systemProcesses(fixedNowMs - 15000),
     devices: [],
     errors: [],
     lastDiscovery: null
@@ -20,6 +21,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     annke?: DiscoveredCamera['annke'];
   }): CameraDiscoveryState => ({
     staleAfterMs: 60 * 60 * 1000,
+    processes: systemProcesses(fixedNowMs - 15000),
     errors: [],
     lastDiscovery: {
       runId: 'discovery-run-1',
@@ -63,6 +65,67 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   tester.setMetadata('Patrol Camera View', 'The SvelteKit frontend serves tabbed camera operations.');
 
   await page.clock.install({ time: fixedNowMs });
+  await page.addInitScript(() => {
+    class PatrolWebSocketMock extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      readonly url: string;
+      readyState = PatrolWebSocketMock.CONNECTING;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        window.setTimeout(() => {
+          this.readyState = PatrolWebSocketMock.OPEN;
+          this.dispatchEvent(new Event('open'));
+          this.dispatchEvent(
+            new MessageEvent('message', {
+              data: JSON.stringify({
+                type: 'patrol.event_stream.connected',
+                ts_ms: Date.now(),
+                streams: ['cameras']
+              })
+            })
+          );
+          this.dispatchEvent(
+            new MessageEvent('message', {
+              data: JSON.stringify({
+                type: 'patrol.event.appended',
+                stream: 'cameras',
+                file: 'cameras-2026-06-10.jsonl',
+                event: {
+                  id: 'live-event-1',
+                  ts_ms: Date.now(),
+                  schema: 1,
+                  type: 'annke.alert_stream.message_received',
+                  source: 'patrol-annke-events',
+                  payload: {
+                    cameraId: 'uuid:driveway-camera',
+                    rawXml:
+                      '<EventNotificationAlert><eventType>VMD</eventType><eventState>active</eventState><targetType>vehicle</targetType></EventNotificationAlert>'
+                  }
+                }
+              })
+            })
+          );
+        }, 0);
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = PatrolWebSocketMock.CLOSED;
+        this.dispatchEvent(new CloseEvent('close'));
+      }
+    }
+
+    Object.defineProperty(window, 'WebSocket', {
+      value: PatrolWebSocketMock
+    });
+  });
 
   await page.route('**/api/cameras/discover', async (route) => {
     if (route.request().method() === 'GET') {
@@ -74,6 +137,16 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     }
 
     discoveryState = discoveredCameraState({ credentials: null });
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(discoveryState)
+    });
+  });
+  await page.route('**/api/system/heartbeat', async (route) => {
+    discoveryState = {
+      ...discoveryState,
+      processes: systemProcesses(fixedNowMs - 5000)
+    };
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify(discoveryState)
@@ -313,6 +386,24 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
+        spec: 'Server task dashboard is green',
+        check: async () => {
+          await expect(page.getByTestId('process-dashboard')).toBeVisible();
+          await expect(page.getByTestId('process-score')).toHaveText('4/4 green');
+          await expect(page.getByText('All server tasks are green.')).toBeVisible();
+        }
+      },
+      {
+        spec: 'All server tasks show last alive times',
+        check: async () => {
+          await expect(page.getByText('Patrol web/API server')).toBeVisible();
+          await expect(page.getByText('Event WebSocket server')).toBeVisible();
+          await expect(page.getByText('go2rtc stream server')).toBeVisible();
+          await expect(page.getByText('Annke alert worker')).toBeVisible();
+          await expect(page.getByTestId('process-row')).toHaveCount(4);
+        }
+      },
+      {
         spec: 'go2rtc observation button is available',
         check: async () => {
           await expect(page.getByTestId('observe-go2rtc')).toBeVisible();
@@ -332,6 +423,19 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('go2rtc configured')).toBeVisible();
           await expect(page.getByText('Main configured: 0 producers, 0 consumers')).toBeVisible();
           await expect(page.getByText('Sub configured: 0 producers, 0 consumers')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Live event websocket is connected',
+        check: async () => {
+          await expect(page.getByTestId('live-event-status')).toHaveText('connected');
+        }
+      },
+      {
+        spec: 'Live pushed event is shown in the debug panel',
+        check: async () => {
+          await expect(page.getByText('annke.alert_stream.message_received')).toBeVisible();
+          await expect(page.getByText('cameras · patrol-annke-events · VMD vehicle active')).toBeVisible();
         }
       }
     ]
@@ -562,4 +666,49 @@ function observedAnnkeAi(observedAtMs: number): DiscoveredCamera['annke'] {
       cameraDateTime: '2026-06-10T12:30:55-04:00'
     }
   };
+}
+
+function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes'] {
+  return [
+    {
+      id: 'patrol-web',
+      label: 'Patrol web/API server',
+      kind: 'server',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'SvelteKit API heartbeat route responded'
+    },
+    {
+      id: 'patrol-events-ws',
+      label: 'Event WebSocket server',
+      kind: 'server',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Streams event log appends to browser clients'
+    },
+    {
+      id: 'patrol-go2rtc',
+      label: 'go2rtc stream server',
+      kind: 'server',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Fans out camera RTSP streams for preview and live view'
+    },
+    {
+      id: 'patrol-annke-events',
+      label: 'Annke alert worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Maintains camera ISAPI alert streams'
+    }
+  ];
 }

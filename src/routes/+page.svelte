@@ -4,6 +4,17 @@
   import type { CameraDiscoveryState, DiscoveredCamera } from '$lib/cameras/discovery';
 
   type Tab = 'cameras' | 'settings' | 'health';
+  type LiveEventConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
+  type LiveEventEntry = {
+    receivedAtMs: number;
+    messageType: string;
+    stream: string | null;
+    eventType: string | null;
+    source: string | null;
+    summary: string;
+  };
+
+  const liveEventPort = '5186';
 
   let discoveryState: CameraDiscoveryState | null = null;
   let error: string | null = null;
@@ -14,15 +25,28 @@
   let activeTab: Tab = 'cameras';
   let nowMs = Date.now();
   let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
+  let liveEventStatus: LiveEventConnectionState = 'connecting';
+  let liveEventError: string | null = null;
+  let liveEventUrl = '';
+  let liveEvents: LiveEventEntry[] = [];
 
   onMount(() => {
     hydrated = true;
     void loadDiscoveryState();
+    void sendSystemHeartbeat();
+    const stopEventSocket = connectEventSocket();
     const interval = window.setInterval(() => {
       nowMs = Date.now();
     }, 60000);
+    const heartbeatInterval = window.setInterval(() => {
+      void sendSystemHeartbeat();
+    }, 30000);
 
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      window.clearInterval(heartbeatInterval);
+      stopEventSocket?.();
+    };
   });
 
   async function loadDiscoveryState() {
@@ -86,6 +110,146 @@
     } finally {
       observingAnnkeAi = false;
     }
+  }
+
+  async function sendSystemHeartbeat() {
+    try {
+      const response = await fetch('/api/system/heartbeat', { method: 'POST' });
+      if (response.ok) {
+        discoveryState = (await response.json()) as CameraDiscoveryState;
+      }
+    } catch {
+      // The process dashboard will show stale/missing state once the API stops responding.
+    }
+  }
+
+  function connectEventSocket() {
+    if (!browser) {
+      return null;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname || 'localhost';
+    liveEventUrl = `${protocol}//${host}:${liveEventPort}/ws/events`;
+    liveEventStatus = 'connecting';
+    liveEventError = null;
+    let stopped = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    const openSocket = () => {
+      socket = new WebSocket(liveEventUrl);
+
+      socket.addEventListener('open', () => {
+        liveEventStatus = 'connected';
+        liveEventError = null;
+      });
+
+      socket.addEventListener('message', (event) => {
+        liveEventStatus = 'connected';
+        liveEventError = null;
+        const liveEvent = summarizeLiveEvent(event.data);
+        liveEvents = [liveEvent, ...liveEvents].slice(0, 30);
+        if (liveEvent.messageType === 'patrol.event.appended') {
+          void loadDiscoveryState();
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        if (stopped) {
+          return;
+        }
+        liveEventStatus = 'disconnected';
+        reconnectTimer = window.setTimeout(openSocket, 2000);
+      });
+
+      socket.addEventListener('error', () => {
+        liveEventStatus = 'error';
+        liveEventError = 'Live event websocket is not reachable.';
+      });
+    };
+
+    openSocket();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      socket?.close();
+    };
+  }
+
+  function summarizeLiveEvent(data: string): LiveEventEntry {
+    const receivedAtMs = Date.now();
+
+    try {
+      const message = JSON.parse(data) as {
+        type?: string;
+        stream?: string;
+        event?: {
+          type?: string;
+          source?: string;
+          payload?: Record<string, unknown>;
+        };
+      };
+      const eventType = message.event?.type ?? null;
+      const source = message.event?.source ?? null;
+
+      return {
+        receivedAtMs,
+        messageType: message.type ?? 'unknown',
+        stream: message.stream ?? null,
+        eventType,
+        source,
+        summary: summarizeLiveEventPayload(message.event?.payload)
+      };
+    } catch {
+      return {
+        receivedAtMs,
+        messageType: 'unparseable',
+        stream: null,
+        eventType: null,
+        source: null,
+        summary: data.slice(0, 180)
+      };
+    }
+  }
+
+  function summarizeLiveEventPayload(payload: Record<string, unknown> | undefined) {
+    if (!payload) {
+      return 'connection message';
+    }
+
+    const path = typeof payload.path === 'string' ? payload.path : null;
+    if (path) {
+      return path;
+    }
+
+    const rawXml = typeof payload.rawXml === 'string' ? payload.rawXml : null;
+    if (rawXml) {
+      const eventType = xmlTag(rawXml, 'eventType');
+      const eventState = xmlTag(rawXml, 'eventState');
+      const targetType = xmlTag(rawXml, 'targetType');
+      return [eventType, targetType, eventState].filter(Boolean).join(' ') || 'Annke alert message';
+    }
+
+    const cameraId = typeof payload.cameraId === 'string' ? payload.cameraId : null;
+    if (cameraId) {
+      return cameraId;
+    }
+
+    const processId = typeof payload.processId === 'string' ? payload.processId : null;
+    if (processId) {
+      return processId;
+    }
+
+    return 'event payload received';
+  }
+
+  function xmlTag(xml: string, tag: string) {
+    const match = xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`));
+    return match?.[1] ?? null;
   }
 
   function configuredCameras() {
@@ -168,6 +332,32 @@
 
   function targetTypesLabel(targetTypes: string[]) {
     return targetTypes.length > 0 ? targetTypes.join(', ') : 'none reported';
+  }
+
+  function processHealthLabel(health: string) {
+    switch (health) {
+      case 'ok':
+        return 'green';
+      case 'stale':
+        return 'stale';
+      case 'error':
+        return 'error';
+      default:
+        return 'missing';
+    }
+  }
+
+  function processLastAliveLabel(tsMs: number | null) {
+    return tsMs ? `${timeAgo(tsMs, nowMs)} ago` : 'never';
+  }
+
+  function greenProcessCount() {
+    return (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
+  }
+
+  function allProcessesGreen() {
+    const processes = discoveryState?.processes ?? [];
+    return processes.length > 0 && processes.every((process) => process.health === 'ok');
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -394,6 +584,41 @@
     </section>
   {:else}
     <section class="view" aria-labelledby="health-title">
+      <section
+        class="process-dashboard"
+        data-health={allProcessesGreen() ? 'ok' : 'attention'}
+        aria-labelledby="process-dashboard-title"
+        data-testid="process-dashboard"
+      >
+        <div class="process-dashboard-header">
+          <div>
+            <h2 id="process-dashboard-title">Server Tasks</h2>
+            <p>{allProcessesGreen() ? 'All server tasks are green.' : 'One or more server tasks need attention.'}</p>
+          </div>
+          <span class="process-score" data-testid="process-score">
+            {greenProcessCount()}/{discoveryState?.processes.length ?? 0} green
+          </span>
+        </div>
+        {#if discoveryState?.processes.length}
+          <ul class="process-list" aria-label="Server task health">
+            {#each discoveryState.processes as process}
+              <li data-health={process.health} data-testid="process-row">
+                <div>
+                  <strong>{process.label}</strong>
+                  <p>{process.detail}</p>
+                </div>
+                <div class="process-meta">
+                  <span class="process-pill" data-health={process.health}>{processHealthLabel(process.health)}</span>
+                  <span>last alive {processLastAliveLabel(process.lastAliveAtMs)}</span>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="notice compact">No server task state has been replayed yet.</p>
+        {/if}
+      </section>
+
       <div class="section-header">
         <div>
           <h2 id="health-title">Monitoring</h2>
@@ -502,6 +727,45 @@
       {:else}
         <p class="notice">No camera state has been replayed yet.</p>
       {/if}
+
+      <section class="live-event-panel" aria-labelledby="live-events-title" data-testid="live-event-panel">
+        <div class="live-event-header">
+          <div>
+            <h2 id="live-events-title">Live Events</h2>
+            <p>Newest append-only event log messages received over WebSocket.</p>
+          </div>
+          <span
+            class="live-event-status"
+            data-state={liveEventStatus}
+            data-testid="live-event-status"
+          >
+            {liveEventStatus}
+          </span>
+        </div>
+        <p class="event-path"><code>{liveEventUrl || `ws://localhost:${liveEventPort}/ws/events`}</code></p>
+        {#if liveEventError}
+          <p class="notice error compact" role="alert">{liveEventError}</p>
+        {/if}
+        {#if liveEvents.length > 0}
+          <ol class="live-event-list" aria-label="Received live events">
+            {#each liveEvents as event}
+              <li data-testid="live-event-row">
+                <div class="live-event-row-header">
+                  <strong>{event.eventType ?? event.messageType}</strong>
+                  <span>{timeAgo(event.receivedAtMs, nowMs)} ago</span>
+                </div>
+                <p>
+                  {#if event.stream}{event.stream} · {/if}
+                  {#if event.source}{event.source} · {/if}
+                  {event.summary}
+                </p>
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <p class="notice compact">Waiting for new events from the event log.</p>
+        {/if}
+      </section>
     </section>
   {/if}
 </main>
@@ -643,6 +907,105 @@
     margin-bottom: 0;
     color: #66727f;
     line-height: 1.4;
+  }
+
+  .process-dashboard {
+    margin-bottom: 16px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 16px;
+  }
+
+  .process-dashboard[data-health="ok"] {
+    border-color: #9bc4ad;
+    background: #f7fcf9;
+  }
+
+  .process-dashboard[data-health="attention"] {
+    border-color: #dfc979;
+    background: #fffdf5;
+  }
+
+  .process-dashboard-header,
+  .process-list li {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .process-dashboard-header {
+    margin-bottom: 12px;
+  }
+
+  .process-dashboard-header p,
+  .process-list p {
+    margin-bottom: 0;
+    color: #66727f;
+    line-height: 1.4;
+  }
+
+  .process-score,
+  .process-pill {
+    border: 1px solid #d5d8dc;
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: #3d4752;
+    font-size: 0.8rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .process-list {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .process-list li {
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #ffffff;
+    padding: 10px 12px;
+  }
+
+  .process-list li > div:first-child {
+    min-width: 0;
+  }
+
+  .process-list li[data-health="ok"],
+  .process-pill[data-health="ok"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+    color: #17683a;
+  }
+
+  .process-list li[data-health="stale"],
+  .process-pill[data-health="stale"],
+  .process-list li[data-health="missing"],
+  .process-pill[data-health="missing"] {
+    border-color: #dfc979;
+    background: #fff9e8;
+    color: #725d0d;
+  }
+
+  .process-list li[data-health="error"],
+  .process-pill[data-health="error"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+    color: #9f1d1d;
+  }
+
+  .process-meta {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+    color: #66727f;
+    font-size: 0.84rem;
+    text-align: right;
   }
 
   .event-path {
@@ -934,6 +1297,80 @@
     padding-left: 18px;
     color: #52606d;
     font-size: 0.88rem;
+  }
+
+  .live-event-panel {
+    margin-top: 12px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 16px;
+  }
+
+  .live-event-header,
+  .live-event-row-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .live-event-header p {
+    margin-bottom: 0;
+    color: #66727f;
+    line-height: 1.4;
+  }
+
+  .live-event-status {
+    border: 1px solid #d5d8dc;
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: #3d4752;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  .live-event-status[data-state="connected"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+    color: #17683a;
+  }
+
+  .live-event-status[data-state="error"],
+  .live-event-status[data-state="disconnected"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+    color: #9f1d1d;
+  }
+
+  .live-event-list {
+    display: grid;
+    gap: 8px;
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .live-event-list li {
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #f9fafb;
+    padding: 10px 12px;
+  }
+
+  .live-event-row-header strong {
+    overflow-wrap: anywhere;
+  }
+
+  .live-event-row-header span,
+  .live-event-list p {
+    color: #66727f;
+    font-size: 0.85rem;
+  }
+
+  .live-event-list p {
+    margin-bottom: 0;
+    overflow-wrap: anywhere;
   }
 
   .go2rtc-status[data-health="streaming"],

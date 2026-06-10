@@ -10,10 +10,46 @@ import type {
   Go2rtcStreamStatus,
   RawProbeResponse
 } from '$lib/cameras/discovery';
+import type { SystemProcessStatus } from '$lib/cameras/discovery';
 import { appendEvent, readEvents, type PatrolEvent } from '$lib/server/event-store';
+import { readSystemEvents, type SystemProcessHeartbeatPayload } from '$lib/server/system-events';
 
 const CAMERA_STREAM = 'cameras';
 const DISCOVERY_STALE_AFTER_MS = 60 * 60 * 1000;
+const PROCESS_STALE_AFTER_MS = 90 * 1000;
+
+const SYSTEM_PROCESS_TASKS: Array<
+  Pick<SystemProcessStatus, 'id' | 'label' | 'kind' | 'expectedEveryMs'> & { detail: string }
+> = [
+  {
+    id: 'patrol-web',
+    label: 'Patrol web/API server',
+    kind: 'server',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Serves the SvelteKit UI and API routes'
+  },
+  {
+    id: 'patrol-events-ws',
+    label: 'Event WebSocket server',
+    kind: 'server',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Streams event log appends to browser clients'
+  },
+  {
+    id: 'patrol-go2rtc',
+    label: 'go2rtc stream server',
+    kind: 'server',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Fans out camera RTSP streams for preview and live view'
+  },
+  {
+    id: 'patrol-annke-events',
+    label: 'Annke alert worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Maintains camera ISAPI alert streams'
+  }
+];
 
 interface DiscoveryInitiatedPayload {
   protocol: 'onvif-ws-discovery';
@@ -85,6 +121,11 @@ export interface AnnkeAlertStreamMessageReceivedPayload {
   sourcePath: '/ISAPI/Event/notification/alertStream';
   receivedAtMs: number;
   rawXml: string;
+}
+
+interface SystemProcessExitedPayload extends SystemProcessHeartbeatPayload {
+  exitCode: number | null;
+  signal: string | null;
 }
 
 export async function appendDiscoveryInitiated(runId: string) {
@@ -160,10 +201,13 @@ export async function appendAnnkeAlertStreamMessageReceived(
 }
 
 export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryState> {
-  return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM));
+  return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM), await readSystemEvents());
 }
 
-export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscoveryState {
+export function reduceCameraDiscoveryEvents(
+  events: PatrolEvent[],
+  systemEvents: PatrolEvent[] = []
+): CameraDiscoveryState {
   const devicesById = new Map<string, DiscoveredCamera>();
   const credentialsByCameraId = new Map<string, DiscoveredCamera['credentials']>();
   const go2rtcConfigsByCameraId = new Map<string, Go2rtcCameraConfig>();
@@ -279,6 +323,7 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
   if (!latestCompleted) {
     return {
       staleAfterMs: DISCOVERY_STALE_AFTER_MS,
+      processes: reduceSystemProcesses(events, systemEvents),
       devices: [],
       errors: [],
       lastDiscovery: null
@@ -288,6 +333,7 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
   const rawResult = latestCompleted.payload.rawResult;
   return {
     staleAfterMs: DISCOVERY_STALE_AFTER_MS,
+    processes: reduceSystemProcesses(events, systemEvents),
     devices: Array.from(devicesById.values())
       .filter((device) => device.credentials || nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
       .sort((a, b) => {
@@ -304,6 +350,126 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
       completedAtMs: latestCompleted.ts_ms
     }
   };
+}
+
+function reduceSystemProcesses(
+  cameraEvents: PatrolEvent[],
+  systemEvents: PatrolEvent[]
+): SystemProcessStatus[] {
+  const nowMs = Date.now();
+  const latestByProcessId = new Map<
+    string,
+    {
+      tsMs: number;
+      eventType: string;
+      detail: string | null;
+      healthOverride: SystemProcessStatus['health'] | null;
+    }
+  >();
+
+  for (const event of systemEvents) {
+    if (event.type === 'system.process.heartbeat') {
+      const heartbeat = event as PatrolEvent<SystemProcessHeartbeatPayload>;
+      updateProcessEvent(latestByProcessId, heartbeat.payload.processId, {
+        tsMs: heartbeat.ts_ms,
+        eventType: heartbeat.type,
+        detail: heartbeat.payload.detail,
+        healthOverride: null
+      });
+    }
+
+    if (event.type === 'system.process.exited') {
+      const exited = event as PatrolEvent<SystemProcessExitedPayload>;
+      updateProcessEvent(latestByProcessId, exited.payload.processId, {
+        tsMs: exited.ts_ms,
+        eventType: exited.type,
+        detail: exited.payload.detail,
+        healthOverride: 'error'
+      });
+    }
+  }
+
+  for (const event of cameraEvents) {
+    if (event.type === 'go2rtc.streams.observed') {
+      const observed = event as PatrolEvent<Go2rtcStreamsObservedPayload>;
+      updateProcessEvent(latestByProcessId, 'patrol-go2rtc', {
+        tsMs: observed.ts_ms,
+        eventType: observed.type,
+        detail: observed.payload.rawResult.ok
+          ? 'go2rtc API health check responded'
+          : observed.payload.rawResult.error ?? 'go2rtc API health check failed',
+        healthOverride: observed.payload.rawResult.ok ? null : 'error'
+      });
+    }
+
+    if (event.type === 'annke.isapi.response.observed') {
+      const observed = event as PatrolEvent<AnnkeIsapiResponseObservedPayload>;
+      updateProcessEvent(latestByProcessId, 'patrol-annke-events', {
+        tsMs: observed.ts_ms,
+        eventType: observed.type,
+        detail: observed.payload.rawResult.ok
+          ? 'Annke ISAPI health check responded'
+          : observed.payload.rawResult.error ?? 'Annke ISAPI health check failed',
+        healthOverride: observed.payload.rawResult.ok ? null : 'error'
+      });
+    }
+
+    if (event.type === 'annke.alert_stream.message_received') {
+      updateProcessEvent(latestByProcessId, 'patrol-annke-events', {
+        tsMs: event.ts_ms,
+        eventType: event.type,
+        detail: 'Annke alert stream delivered an event',
+        healthOverride: null
+      });
+    }
+  }
+
+  return SYSTEM_PROCESS_TASKS.map((task) => {
+    const latest = latestByProcessId.get(task.id);
+    const stale = latest ? nowMs - latest.tsMs > task.expectedEveryMs : false;
+    const health = !latest
+      ? 'missing'
+      : latest.healthOverride === 'error'
+        ? 'error'
+        : stale
+          ? 'stale'
+          : 'ok';
+
+    return {
+      id: task.id,
+      label: task.label,
+      kind: task.kind,
+      expectedEveryMs: task.expectedEveryMs,
+      lastAliveAtMs: latest?.tsMs ?? null,
+      lastEventType: latest?.eventType ?? null,
+      health,
+      detail: latest?.detail ?? task.detail
+    };
+  });
+}
+
+function updateProcessEvent(
+  latestByProcessId: Map<
+    string,
+    {
+      tsMs: number;
+      eventType: string;
+      detail: string | null;
+      healthOverride: SystemProcessStatus['health'] | null;
+    }
+  >,
+  processId: string,
+  event: {
+    tsMs: number;
+    eventType: string;
+    detail: string | null;
+    healthOverride: SystemProcessStatus['health'] | null;
+  }
+) {
+  const existing = latestByProcessId.get(processId);
+  if (!existing || event.tsMs >= existing.tsMs) {
+    latestByProcessId.set(processId, event);
+  }
 }
 
 function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {

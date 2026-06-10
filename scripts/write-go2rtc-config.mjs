@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { appendCameraEvent } from './lib/patrol-events.mjs';
 
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
 const eventsDir = path.join(dataRoot, 'events');
@@ -55,23 +55,6 @@ async function readJsonlDir(dir, prefix) {
     }
   }
   return events.sort((left, right) => left.ts_ms - right.ts_ms || left.id.localeCompare(right.id));
-}
-
-async function appendCameraEvent(event) {
-  await mkdir(eventsDir, { recursive: true, mode: 0o700 });
-  const storedEvent = {
-    id: randomUUID(),
-    ts_ms: Date.now(),
-    schema: 1,
-    ...event
-  };
-  const day = new Date(storedEvent.ts_ms).toISOString().slice(0, 10);
-  const filePath = path.join(eventsDir, `cameras-${day}.jsonl`);
-  await writeFile(filePath, `${JSON.stringify(storedEvent)}\n`, {
-    encoding: 'utf8',
-    flag: 'a',
-    mode: 0o600
-  });
 }
 
 function reduceCameras(events) {

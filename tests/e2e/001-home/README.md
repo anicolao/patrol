@@ -62,9 +62,13 @@
 
 **Verifications:**
 - [x] Health tab is selected
+- [x] Server task dashboard is green
+- [x] All server tasks show last alive times
 - [x] go2rtc observation button is available
 - [x] Annke AI observation button is available
 - [x] go2rtc configuration is replayed from events
+- [x] Live event websocket is connected
+- [x] Live pushed event is shown in the debug panel
 
 ---
 
