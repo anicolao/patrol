@@ -7,7 +7,7 @@ export default defineConfig({
   retries: 0,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:5184',
+    baseURL: 'http://localhost:5185',
     trace: 'on-first-retry',
     contextOptions: { reducedMotion: 'reduce' },
     serviceWorkers: 'block',
@@ -42,8 +42,8 @@ export default defineConfig({
     }
   ],
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5184',
+    command: 'npm run dev:e2e',
+    url: 'http://localhost:5185',
     reuseExistingServer: false
   },
   timeout: 60000,

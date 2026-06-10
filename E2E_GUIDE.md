@@ -78,5 +78,6 @@ npm run test:e2e:update-snapshots
 Do not use arbitrary sleeps. Wait for real UI states with Playwright assertions
 such as `expect(locator).toBeVisible()`.
 
-Playwright starts Patrol's dev server on port `5184` and does not reuse existing
-servers, so a passing E2E run proves the Patrol frontend itself is serving.
+Manual development uses port `5184`. Playwright starts its own Patrol dev server
+on port `5185` and does not reuse existing servers, so E2E runs can execute
+while a manual dev server is already running.
