@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { browser } from '$app/environment';
   import type { CameraDiscoveryState, DiscoveredCamera } from '$lib/cameras/discovery';
 
   let discoveryState: CameraDiscoveryState | null = null;
   let error: string | null = null;
   let discovering = false;
+  let observingGo2rtc = false;
   let hydrated = false;
   let nowMs = Date.now();
   let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
@@ -48,8 +50,40 @@
     }
   }
 
+  async function observeGo2rtc() {
+    observingGo2rtc = true;
+    error = null;
+
+    try {
+      const response = await fetch('/api/go2rtc/observe', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`go2rtc observation failed with HTTP ${response.status}`);
+      }
+      discoveryState = (await response.json()) as CameraDiscoveryState;
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+    } finally {
+      observingGo2rtc = false;
+    }
+  }
+
   function displayName(camera: DiscoveredCamera) {
     return camera.name ?? camera.hardware ?? camera.remoteAddress;
+  }
+
+  function cameraPath(camera: DiscoveredCamera) {
+    return `/cameras/${encodeURIComponent(camera.id)}`;
+  }
+
+  function go2rtcStreamPath(camera: DiscoveredCamera, stream: 'main' | 'sub') {
+    const baseUrl = browser ? `${window.location.protocol}//${window.location.hostname}:1984` : 'http://127.0.0.1:1984';
+    const params = new URLSearchParams({
+      src: camera.streams[stream],
+      mode: 'webrtc,mse,hls',
+      width: '100%',
+      background: 'false'
+    });
+    return `${baseUrl}/stream.html?${params.toString()}`;
   }
 
   function timeAgo(tsMs: number, currentMs: number) {
@@ -75,6 +109,21 @@
 
     const minutes = Math.floor(ms / (60 * 1000));
     return `${minutes}m`;
+  }
+
+  function healthLabel(health: string) {
+    switch (health) {
+      case 'streaming':
+        return 'streaming';
+      case 'ready':
+        return 'ready';
+      case 'partial':
+        return 'partially ready';
+      case 'offline':
+        return 'offline';
+      default:
+        return 'configured';
+    }
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -147,15 +196,27 @@
         <p>Uses ONVIF WS-Discovery from the Patrol server process.</p>
         <p class="event-path">Events append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
       </div>
-      <button
-        type="button"
-        onclick={discoverCameras}
-        disabled={discovering || !hydrated}
-        aria-busy={discovering}
-        data-testid="discover-cameras"
-      >
-        {discovering ? 'Scanning...' : 'Discover'}
-      </button>
+      <div class="panel-actions">
+        <button
+          type="button"
+          onclick={discoverCameras}
+          disabled={discovering || !hydrated}
+          aria-busy={discovering}
+          data-testid="discover-cameras"
+        >
+          {discovering ? 'Scanning...' : 'Discover'}
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          onclick={observeGo2rtc}
+          disabled={observingGo2rtc || !hydrated}
+          aria-busy={observingGo2rtc}
+          data-testid="observe-go2rtc"
+        >
+          {observingGo2rtc ? 'Observing...' : 'Observe streams'}
+        </button>
+      </div>
     </div>
 
     {#if error}
@@ -188,6 +249,54 @@
                 <p>{camera.remoteAddress}</p>
                 <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs, nowMs)} ago</p>
               </div>
+
+              {#if camera.credentials}
+                <div class="camera-preview">
+                  <iframe
+                    src={go2rtcStreamPath(camera, 'sub')}
+                    title={`${displayName(camera)} go2rtc preview`}
+                    data-testid="camera-preview-frame"
+                  ></iframe>
+                  <a
+                    href={cameraPath(camera)}
+                    aria-label={`Open live view for ${displayName(camera)}`}
+                    data-testid="camera-preview-link"
+                  >
+                    Open high-resolution live view
+                  </a>
+                </div>
+
+                {#if camera.go2rtc}
+                  <div
+                    class="go2rtc-status"
+                    data-health={camera.go2rtc.health}
+                    data-testid="go2rtc-camera-status"
+                  >
+                    <p>
+                      go2rtc {healthLabel(camera.go2rtc.health)}
+                      {#if camera.go2rtc.observedAtMs}
+                        · observed {timeAgo(camera.go2rtc.observedAtMs, nowMs)} ago
+                      {/if}
+                    </p>
+                    <ul>
+                      <li>
+                        Main {healthLabel(camera.go2rtc.streams.main.health)}:
+                        {camera.go2rtc.streams.main.producerCount} producer{camera.go2rtc.streams.main.producerCount === 1 ? '' : 's'},
+                        {camera.go2rtc.streams.main.consumerCount} consumer{camera.go2rtc.streams.main.consumerCount === 1 ? '' : 's'}
+                      </li>
+                      <li>
+                        Sub {healthLabel(camera.go2rtc.streams.sub.health)}:
+                        {camera.go2rtc.streams.sub.producerCount} producer{camera.go2rtc.streams.sub.producerCount === 1 ? '' : 's'},
+                        {camera.go2rtc.streams.sub.consumerCount} consumer{camera.go2rtc.streams.sub.consumerCount === 1 ? '' : 's'}
+                      </li>
+                    </ul>
+                  </div>
+                {:else}
+                  <p class="go2rtc-missing" data-testid="go2rtc-camera-status">
+                    go2rtc has not materialized stream configuration for this camera yet.
+                  </p>
+                {/if}
+              {/if}
 
               <dl>
                 <div>
@@ -341,6 +450,13 @@
     justify-content: space-between;
   }
 
+  .panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
   .panel-header p {
     margin-bottom: 0;
     color: #66727f;
@@ -423,6 +539,70 @@
   .camera-card p {
     margin-bottom: 12px;
     color: #66727f;
+  }
+
+  .camera-preview {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .camera-preview iframe {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #111827;
+  }
+
+  .camera-preview a {
+    font-size: 0.9rem;
+    font-weight: 650;
+  }
+
+  .go2rtc-status,
+  .go2rtc-missing {
+    margin: 0 0 16px;
+    border: 1px solid #d5d8dc;
+    border-radius: 6px;
+    background: #f9fafb;
+    padding: 10px 12px;
+  }
+
+  .go2rtc-status[data-health="streaming"],
+  .go2rtc-status[data-health="ready"] {
+    border-color: #9bc4ad;
+    background: #f2fbf5;
+  }
+
+  .go2rtc-status[data-health="partial"] {
+    border-color: #dfc979;
+    background: #fff9e8;
+  }
+
+  .go2rtc-status[data-health="offline"] {
+    border-color: #dfa6a6;
+    background: #fff5f5;
+  }
+
+  .go2rtc-status p,
+  .go2rtc-missing {
+    color: #3d4752;
+  }
+
+  .go2rtc-status p {
+    margin-bottom: 6px;
+    font-weight: 650;
+  }
+
+  .go2rtc-status ul {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: #52606d;
+    font-size: 0.88rem;
   }
 
   .setup-actions {

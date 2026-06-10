@@ -2,6 +2,10 @@ import type {
   CameraDiscoveryRawResult,
   CameraDiscoveryState,
   DiscoveredCamera,
+  Go2rtcCameraHealth,
+  Go2rtcCameraStatus,
+  Go2rtcStreamRole,
+  Go2rtcStreamStatus,
   RawProbeResponse
 } from '$lib/cameras/discovery';
 import { appendEvent, readEvents, type PatrolEvent } from '$lib/server/event-store';
@@ -25,6 +29,34 @@ interface CameraCredentialsSavedPayload {
     password: string;
   };
   secretStoredAtMs: number;
+}
+
+export interface Go2rtcConfiguredStream {
+  cameraId: string;
+  role: Go2rtcStreamRole;
+  streamName: string;
+}
+
+export interface Go2rtcConfigMaterializedPayload {
+  apiBaseUrl: string;
+  configPath: string;
+  streams: Go2rtcConfiguredStream[];
+}
+
+export interface Go2rtcObservationRequestedPayload {
+  apiBaseUrl: string;
+}
+
+export interface Go2rtcStreamsObservedPayload {
+  rawResult: {
+    apiBaseUrl: string;
+    startedAtMs: number;
+    durationMs: number;
+    ok: boolean;
+    statusCode: number | null;
+    body: string | null;
+    error: string | null;
+  };
 }
 
 export async function appendDiscoveryInitiated(runId: string) {
@@ -57,6 +89,22 @@ export async function appendCameraCredentialsSaved(payload: CameraCredentialsSav
   });
 }
 
+export async function appendGo2rtcObservationRequested(payload: Go2rtcObservationRequestedPayload) {
+  return await appendEvent<Go2rtcObservationRequestedPayload>(CAMERA_STREAM, {
+    type: 'go2rtc.observation.requested',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendGo2rtcStreamsObserved(payload: Go2rtcStreamsObservedPayload) {
+  return await appendEvent<Go2rtcStreamsObservedPayload>(CAMERA_STREAM, {
+    type: 'go2rtc.streams.observed',
+    source: 'patrol-go2rtc-observer',
+    payload
+  });
+}
+
 export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryState> {
   return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM));
 }
@@ -64,7 +112,9 @@ export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryStat
 export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscoveryState {
   const devicesById = new Map<string, DiscoveredCamera>();
   const credentialsByCameraId = new Map<string, DiscoveredCamera['credentials']>();
+  const go2rtcConfigsByCameraId = new Map<string, Go2rtcCameraConfig>();
   let latestCompleted: PatrolEvent<DiscoveryCompletedPayload> | null = null;
+  let latestGo2rtcObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null = null;
   const nowMs = Date.now();
 
   for (const event of events) {
@@ -75,6 +125,27 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
         usernameSecretId: saved.payload.secretIds.username,
         passwordSecretId: saved.payload.secretIds.password
       });
+      continue;
+    }
+
+    if (event.type === 'go2rtc.config.materialized') {
+      const materialized = event as PatrolEvent<Go2rtcConfigMaterializedPayload>;
+      for (const stream of materialized.payload.streams) {
+        const config = go2rtcConfigsByCameraId.get(stream.cameraId) ?? {
+          configuredAtMs: materialized.ts_ms,
+          apiBaseUrl: materialized.payload.apiBaseUrl,
+          streams: {}
+        };
+        config.configuredAtMs = materialized.ts_ms;
+        config.apiBaseUrl = materialized.payload.apiBaseUrl;
+        config.streams[stream.role] = stream.streamName;
+        go2rtcConfigsByCameraId.set(stream.cameraId, config);
+      }
+      continue;
+    }
+
+    if (event.type === 'go2rtc.streams.observed') {
+      latestGo2rtcObservation = event as PatrolEvent<Go2rtcStreamsObservedPayload>;
       continue;
     }
 
@@ -93,7 +164,8 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
       const existing = devicesById.get(device.id);
       devicesById.set(device.id, {
         ...device,
-        credentials: existing?.credentials ?? null
+        credentials: existing?.credentials ?? null,
+        go2rtc: existing?.go2rtc ?? null
       });
     }
   }
@@ -106,6 +178,21 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
         credentials
       });
     }
+  }
+
+  const latestObservedStreams = latestGo2rtcObservation
+    ? parseGo2rtcStreams(latestGo2rtcObservation.payload.rawResult.body)
+    : new Map<string, Go2rtcObservedStream>();
+
+  for (const [cameraId, device] of devicesById) {
+    devicesById.set(cameraId, {
+      ...device,
+      go2rtc: buildGo2rtcCameraStatus(
+        go2rtcConfigsByCameraId.get(cameraId) ?? null,
+        latestGo2rtcObservation,
+        latestObservedStreams
+      )
+    });
   }
 
   if (!latestCompleted) {
@@ -121,7 +208,7 @@ export function reduceCameraDiscoveryEvents(events: PatrolEvent[]): CameraDiscov
   return {
     staleAfterMs: DISCOVERY_STALE_AFTER_MS,
     devices: Array.from(devicesById.values())
-      .filter((device) => nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
+      .filter((device) => device.credentials || nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
       .sort((a, b) => {
         const left = a.name ?? a.remoteAddress;
         const right = b.name ?? b.remoteAddress;
@@ -158,8 +245,155 @@ function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {
     hardware: scopeValue(scopes, '/hardware/'),
     location: scopeValue(scopes, '/location/'),
     vendorHint: inferVendor(scopes, xaddrs),
-    credentials: null
+    streams: streamNames(scopes, response.remoteAddress, id),
+    credentials: null,
+    go2rtc: null
   };
+}
+
+interface Go2rtcCameraConfig {
+  configuredAtMs: number;
+  apiBaseUrl: string;
+  streams: Partial<Record<Go2rtcStreamRole, string>>;
+}
+
+interface Go2rtcObservedStream {
+  producerCount: number;
+  consumerCount: number;
+}
+
+function buildGo2rtcCameraStatus(
+  config: Go2rtcCameraConfig | null,
+  latestObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null,
+  observedStreams: Map<string, Go2rtcObservedStream>
+): Go2rtcCameraStatus | null {
+  if (!config) {
+    return null;
+  }
+
+  const apiReachable = latestObservation ? latestObservation.payload.rawResult.ok : null;
+  const main = buildGo2rtcStreamStatus('main', config, latestObservation, observedStreams);
+  const sub = buildGo2rtcStreamStatus('sub', config, latestObservation, observedStreams);
+  const health = cameraHealth([main, sub], apiReachable);
+
+  return {
+    configuredAtMs: config.configuredAtMs,
+    observedAtMs: latestObservation?.ts_ms ?? null,
+    apiReachable,
+    apiBaseUrl: config.apiBaseUrl,
+    health,
+    streams: { main, sub }
+  };
+}
+
+function buildGo2rtcStreamStatus(
+  role: Go2rtcStreamRole,
+  config: Go2rtcCameraConfig,
+  latestObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null,
+  observedStreams: Map<string, Go2rtcObservedStream>
+): Go2rtcStreamStatus {
+  const streamName = config.streams[role] ?? '';
+  const observed = streamName ? observedStreams.get(streamName) : undefined;
+  const configured = Boolean(streamName);
+  let health: Go2rtcCameraHealth = configured ? 'configured' : 'offline';
+
+  if (latestObservation) {
+    if (!latestObservation.payload.rawResult.ok || !observed) {
+      health = 'offline';
+    } else if (observed.consumerCount > 0) {
+      health = 'streaming';
+    } else if (observed.producerCount > 0) {
+      health = 'ready';
+    } else {
+      health = 'offline';
+    }
+  }
+
+  return {
+    streamName,
+    configured,
+    observed: Boolean(observed),
+    producerCount: observed?.producerCount ?? 0,
+    consumerCount: observed?.consumerCount ?? 0,
+    health
+  };
+}
+
+function cameraHealth(
+  streams: Go2rtcStreamStatus[],
+  apiReachable: Go2rtcCameraStatus['apiReachable']
+): Go2rtcCameraHealth {
+  if (apiReachable === false) {
+    return 'offline';
+  }
+
+  if (streams.some((stream) => stream.health === 'streaming')) {
+    return 'streaming';
+  }
+
+  if (streams.every((stream) => stream.health === 'ready')) {
+    return 'ready';
+  }
+
+  if (streams.some((stream) => stream.health === 'ready' || stream.health === 'streaming')) {
+    return 'partial';
+  }
+
+  if (streams.every((stream) => stream.health === 'configured')) {
+    return 'configured';
+  }
+
+  return 'offline';
+}
+
+function parseGo2rtcStreams(body: string | null) {
+  const observedStreams = new Map<string, Go2rtcObservedStream>();
+  if (!body) {
+    return observedStreams;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return observedStreams;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return observedStreams;
+  }
+
+  for (const [streamName, value] of Object.entries(parsed)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      continue;
+    }
+    const record = value as { producers?: unknown; consumers?: unknown };
+    observedStreams.set(streamName, {
+      producerCount: Array.isArray(record.producers) ? record.producers.length : 0,
+      consumerCount: Array.isArray(record.consumers) ? record.consumers.length : 0
+    });
+  }
+
+  return observedStreams;
+}
+
+function streamNames(scopes: string[], remoteAddress: string, id: string) {
+  const rawName = scopeValue(scopes, '/name/') ?? scopeValue(scopes, '/hardware/') ?? remoteAddress ?? id;
+  const baseName = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const streamBase = baseName || `camera_${Math.abs(hashString(id))}`;
+  return {
+    main: `${streamBase}_main`,
+    sub: `${streamBase}_sub`
+  };
+}
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return hash;
 }
 
 function textForTag(xml: string, tagName: string) {
