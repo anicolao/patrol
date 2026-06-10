@@ -48,6 +48,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Maintains camera ISAPI alert streams'
+  },
+  {
+    id: 'patrol-watchdog',
+    label: 'Watchdog cron',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Verifies server task health and sends failure notifications'
   }
 ];
 

@@ -55,6 +55,20 @@
               node scripts/event-websocket-server.mjs
             '';
           };
+          patrol-watchdog = pkgs.writeShellApplication {
+            name = "patrol-watchdog";
+            runtimeInputs = [ pkgs.nodejs_24 ];
+            text = ''
+              node scripts/watchdog.mjs
+            '';
+          };
+          patrol-watchdog-cron-install = pkgs.writeShellApplication {
+            name = "patrol-watchdog-cron-install";
+            runtimeInputs = [ pkgs.nodejs_24 ];
+            text = ''
+              node scripts/install-watchdog-cron.mjs
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -69,6 +83,8 @@
               patrol-go2rtc-config
               patrol-go2rtc-observe
               patrol-go2rtc-start
+              patrol-watchdog
+              patrol-watchdog-cron-install
             ];
           };
         });

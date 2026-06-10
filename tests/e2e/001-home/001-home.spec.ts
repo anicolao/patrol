@@ -389,7 +389,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('4/4 green');
+          await expect(page.getByTestId('process-score')).toHaveText('5/5 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -400,7 +400,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('Event WebSocket server')).toBeVisible();
           await expect(page.getByText('go2rtc stream server')).toBeVisible();
           await expect(page.getByText('Annke alert worker')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(4);
+          await expect(page.getByText('Watchdog cron')).toBeVisible();
+          await expect(page.getByTestId('process-row')).toHaveCount(5);
         }
       },
       {
@@ -709,6 +710,16 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       lastEventType: 'system.process.heartbeat',
       health: 'ok',
       detail: 'Maintains camera ISAPI alert streams'
+    },
+    {
+      id: 'patrol-watchdog',
+      label: 'Watchdog cron',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Verifies server task health and sends failure notifications'
     }
   ];
 }
