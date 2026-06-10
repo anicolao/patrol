@@ -9,13 +9,29 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   tester.setMetadata('Patrol Camera Discovery', 'The SvelteKit frontend serves camera discovery.');
 
   await page.route('**/api/cameras/discover', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          devices: [],
+          errors: [],
+          lastDiscovery: null
+        })
+      });
+      return;
+    }
+
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        protocol: 'onvif-ws-discovery',
-        startedAtMs: 1781099112345,
-        durationMs: 42,
         errors: [],
+        lastDiscovery: {
+          runId: 'discovery-run-1',
+          protocol: 'onvif-ws-discovery',
+          startedAtMs: 1781099112345,
+          durationMs: 42,
+          completedAtMs: 1781099112387
+        },
         devices: [
           {
             id: 'uuid:driveway-camera',
@@ -77,6 +93,12 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await expect(page.getByTestId('discover-cameras')).toBeVisible();
           await expect(page.getByTestId('discover-cameras')).toBeEnabled();
+        }
+      },
+      {
+        spec: 'Discovery event log path is shown',
+        check: async () => {
+          await expect(page.getByText('.patrol/events/cameras-YYYY-MM-DD.jsonl')).toBeVisible();
         }
       }
     ]

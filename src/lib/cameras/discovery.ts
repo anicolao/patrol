@@ -19,3 +19,15 @@ export interface CameraDiscoveryResult {
   devices: DiscoveredCamera[];
   errors: string[];
 }
+
+export interface CameraDiscoveryState {
+  devices: DiscoveredCamera[];
+  errors: string[];
+  lastDiscovery: {
+    runId: string;
+    protocol: 'onvif-ws-discovery';
+    startedAtMs: number;
+    durationMs: number;
+    completedAtMs: number;
+  } | null;
+}

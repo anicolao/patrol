@@ -8,6 +8,7 @@
 - [x] Document title is Patrol
 - [x] Patrol heading is visible
 - [x] Discovery button is visible
+- [x] Discovery event log path is shown
 
 ---
 
