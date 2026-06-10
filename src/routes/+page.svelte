@@ -14,7 +14,7 @@
     void loadDiscoveryState();
     const interval = window.setInterval(() => {
       nowMs = Date.now();
-    }, 30000);
+    }, 60000);
 
     return () => window.clearInterval(interval);
   });
