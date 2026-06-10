@@ -76,6 +76,20 @@ export interface Go2rtcCameraStatus {
   streams: Record<Go2rtcStreamRole, Go2rtcStreamStatus>;
 }
 
+export type SystemProcessHealth = 'ok' | 'stale' | 'missing' | 'error';
+export type SystemProcessKind = 'server' | 'worker';
+
+export interface SystemProcessStatus {
+  id: string;
+  label: string;
+  kind: SystemProcessKind;
+  expectedEveryMs: number;
+  lastAliveAtMs: number | null;
+  lastEventType: string | null;
+  health: SystemProcessHealth;
+  detail: string | null;
+}
+
 export interface RawProbeResponse {
   remoteAddress: string;
   receivedAtMs: number;
@@ -92,6 +106,7 @@ export interface CameraDiscoveryRawResult {
 
 export interface CameraDiscoveryState {
   staleAfterMs: number;
+  processes: SystemProcessStatus[];
   devices: DiscoveredCamera[];
   errors: string[];
   lastDiscovery: {

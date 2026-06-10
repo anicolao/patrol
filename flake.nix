@@ -31,8 +31,7 @@
               pkgs.nodejs_24
             ];
             text = ''
-              config_path="$(node scripts/write-go2rtc-config.mjs)"
-              exec go2rtc -c "$config_path"
+              node scripts/start-go2rtc.mjs
             '';
           };
           patrol-go2rtc-observe = pkgs.writeShellApplication {
@@ -49,6 +48,13 @@
               node scripts/observe-annke-events.mjs
             '';
           };
+          patrol-events-ws = pkgs.writeShellApplication {
+            name = "patrol-events-ws";
+            runtimeInputs = [ pkgs.nodejs_24 ];
+            text = ''
+              node scripts/event-websocket-server.mjs
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -59,6 +65,7 @@
               pkgs.go2rtc
               pkgs.nodejs_24
               patrol-annke-events
+              patrol-events-ws
               patrol-go2rtc-config
               patrol-go2rtc-observe
               patrol-go2rtc-start

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { startProcessHeartbeats } from './lib/patrol-events.mjs';
 
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
 const eventsDir = path.join(dataRoot, 'events');
@@ -13,13 +14,21 @@ const capabilityPaths = [
 ];
 const durationMs = Number(process.env.PATROL_ANNKE_ALERT_DURATION_MS ?? '0');
 const credentials = latestCameraCredentials(await readJsonlDir(secretsDir, 'secrets-'));
+const heartbeat = startProcessHeartbeats({
+  processId: 'patrol-annke-events',
+  label: 'Annke alert worker',
+  kind: 'worker',
+  detail: 'Maintains camera ISAPI alert streams'
+});
 
 if (credentials.length === 0) {
   console.error('No camera credentials found in .patrol/secrets.');
+  clearInterval(heartbeat);
   process.exit(1);
 }
 
 await Promise.all(credentials.map((cameraCredentials) => observeCamera(cameraCredentials)));
+clearInterval(heartbeat);
 
 async function observeCamera(cameraCredentials) {
   await observeCapabilities(cameraCredentials);
