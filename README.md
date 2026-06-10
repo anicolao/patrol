@@ -1,5 +1,7 @@
 # Patrol
 
+[![E2E Tests](https://github.com/anicolao/patrol/actions/workflows/e2e.yml/badge.svg)](https://github.com/anicolao/patrol/actions/workflows/e2e.yml)
+
 Patrol is a home security system for Annke cameras. It is designed to be
 minimal, auditable, and integrated with the camera features that Annke exposes
 through RTSP, ONVIF, and ISAPI.
