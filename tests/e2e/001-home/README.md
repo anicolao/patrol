@@ -20,6 +20,7 @@
 - [x] Camera count is shown
 - [x] Driveway camera name is shown
 - [x] Camera address is shown
+- [x] Discovery age is shown
 - [x] First-time setup link opens camera web UI
 
 ---

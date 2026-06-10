@@ -6,11 +6,17 @@
   let error: string | null = null;
   let discovering = false;
   let hydrated = false;
+  let nowMs = Date.now();
   let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
 
   onMount(() => {
     hydrated = true;
     void loadDiscoveryState();
+    const interval = window.setInterval(() => {
+      nowMs = Date.now();
+    }, 30000);
+
+    return () => window.clearInterval(interval);
   });
 
   async function loadDiscoveryState() {
@@ -46,6 +52,31 @@
     return camera.name ?? camera.hardware ?? camera.remoteAddress;
   }
 
+  function timeAgo(tsMs: number) {
+    const ageSeconds = Math.max(0, Math.floor((nowMs - tsMs) / 1000));
+    if (ageSeconds < 60) {
+      return `${ageSeconds} second${ageSeconds === 1 ? '' : 's'}`;
+    }
+
+    const ageMinutes = Math.floor(ageSeconds / 60);
+    if (ageMinutes < 60) {
+      return `${ageMinutes} minute${ageMinutes === 1 ? '' : 's'}`;
+    }
+
+    const ageHours = Math.floor(ageMinutes / 60);
+    return `${ageHours} hour${ageHours === 1 ? '' : 's'}`;
+  }
+
+  function formatWindow(ms: number) {
+    const hours = Math.floor(ms / (60 * 60 * 1000));
+    if (hours >= 1) {
+      return `${hours}h`;
+    }
+
+    const minutes = Math.floor(ms / (60 * 1000));
+    return `${minutes}m`;
+  }
+
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -77,10 +108,11 @@
       if (!response.ok) {
         throw new Error(`Credential save failed with HTTP ${response.status}`);
       }
+      discoveryState = (await response.json()) as CameraDiscoveryState;
 
       credentialStatus = {
         ...credentialStatus,
-        [camera.id]: { state: 'saved', message: 'Credentials saved to the local secrets log.' }
+        [camera.id]: { state: 'saved', message: 'Credentials saved to event logs.' }
       };
       form.reset();
     } catch (caught) {
@@ -134,6 +166,8 @@
           {discoveryState.devices.length} camera{discoveryState.devices.length === 1 ? '' : 's'} found
         </span>
         <span>{discoveryState.lastDiscovery.durationMs} ms</span>
+        <span>Last discovery {timeAgo(discoveryState.lastDiscovery.completedAtMs)} ago</span>
+        <span>Showing cameras seen in the last {formatWindow(discoveryState.staleAfterMs)}</span>
         <span>Event replayed</span>
       </div>
 
@@ -152,6 +186,7 @@
               <div>
                 <h3>{displayName(camera)}</h3>
                 <p>{camera.remoteAddress}</p>
+                <p class="freshness">Discovered {timeAgo(camera.lastSeenAtMs)} ago</p>
               </div>
 
               <dl>
@@ -200,6 +235,12 @@
                   {credentialStatus[camera.id]?.state === 'saving' ? 'Saving...' : 'Save credentials'}
                 </button>
               </form>
+
+              {#if camera.credentials}
+                <p class="credential-status success" role="status">
+                  Credentials saved {timeAgo(camera.credentials.savedAtMs)} ago.
+                </p>
+              {/if}
 
               {#if credentialStatus[camera.id]}
                 <p
