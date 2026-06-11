@@ -137,7 +137,8 @@ function annkeRtspUrl(credentials, profile) {
   const host = credentials.host.includes(':') ? `[${credentials.host}]` : credentials.host;
   const username = encodeURIComponent(credentials.username);
   const password = encodeURIComponent(credentials.password);
-  return `rtsp://${username}:${password}@${host}:554/H265/ch%201/${profile}/av_stream`;
+  const channel = profile === 'main' ? '101' : '102';
+  return `rtsp://${username}:${password}@${host}:554/Streaming/Channels/${channel}`;
 }
 
 function textForTag(xml, tagName) {

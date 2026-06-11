@@ -86,9 +86,14 @@ Use `WATCHDOG_SETUP.md` to install the local cron watchdog. It checks the
 system health reducer every minute and sends Pushover notifications when any
 expected security service is not green.
 
+Use `RECORDINGS_SETUP.md` for the historical recording worker. Patrol records
+the main and sub streams continuously from go2rtc, keeps full-quality segments
+for 7 days, keeps substream segments for 30 days, and exposes Annke alert
+events in the History tab for direct playback.
+
 ## Repository Status
 
 This repository now contains the early Patrol implementation: camera discovery,
 go2rtc stream materialization, Annke event observation, live event streaming,
-and system health monitoring. `MVP_DESIGN.md` remains the implementation guide
-for the next pieces of the pipeline.
+historical recording, and system health monitoring. `MVP_DESIGN.md` remains
+the implementation guide for the next pieces of the pipeline.

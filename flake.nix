@@ -55,6 +55,16 @@
               node scripts/event-websocket-server.mjs
             '';
           };
+          patrol-recorder = pkgs.writeShellApplication {
+            name = "patrol-recorder";
+            runtimeInputs = [
+              pkgs.ffmpeg
+              pkgs.nodejs_24
+            ];
+            text = ''
+              node scripts/start-recorder.mjs
+            '';
+          };
           patrol-watchdog = pkgs.writeShellApplication {
             name = "patrol-watchdog";
             runtimeInputs = [ pkgs.nodejs_24 ];
@@ -83,6 +93,7 @@
               patrol-go2rtc-config
               patrol-go2rtc-observe
               patrol-go2rtc-start
+              patrol-recorder
               patrol-watchdog
               patrol-watchdog-cron-install
             ];

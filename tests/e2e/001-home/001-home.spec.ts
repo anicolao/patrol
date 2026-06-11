@@ -8,6 +8,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     staleAfterMs: 60 * 60 * 1000,
     processes: systemProcesses(fixedNowMs - 15000),
     devices: [],
+    recordings: emptyRecordings(),
     errors: [],
     lastDiscovery: null
   };
@@ -22,6 +23,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   }): CameraDiscoveryState => ({
     staleAfterMs: 60 * 60 * 1000,
     processes: systemProcesses(fixedNowMs - 15000),
+    recordings: annke ? recordingState(fixedNowMs - 4000) : emptyRecordings(),
     errors: [],
     lastDiscovery: {
       runId: 'discovery-run-1',
@@ -127,15 +129,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     });
   });
 
+  await page.route('**/api/state', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify(discoveryState)
+    });
+  });
   await page.route('**/api/cameras/discover', async (route) => {
-    if (route.request().method() === 'GET') {
-      await route.fulfill({
-        contentType: 'application/json',
-        body: JSON.stringify(discoveryState)
-      });
-      return;
-    }
-
     discoveryState = discoveredCameraState({ credentials: null });
     await route.fulfill({
       contentType: 'application/json',
@@ -238,6 +238,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByTestId('tab-cameras')).toHaveAttribute('aria-current', 'page');
           await expect(page.getByTestId('tab-settings')).toBeVisible();
           await expect(page.getByTestId('tab-settings')).toBeEnabled();
+          await expect(page.getByTestId('tab-history')).toBeVisible();
+          await expect(page.getByTestId('tab-history')).toBeEnabled();
           await expect(page.getByTestId('tab-health')).toBeVisible();
           await expect(page.getByTestId('tab-health')).toBeEnabled();
         }
@@ -389,7 +391,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('5/5 green');
+          await expect(page.getByTestId('process-score')).toHaveText('6/6 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -401,7 +403,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('go2rtc stream server')).toBeVisible();
           await expect(page.getByText('Annke alert worker')).toBeVisible();
           await expect(page.getByText('Watchdog cron')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(5);
+          await expect(page.getByText('Recording worker')).toBeVisible();
+          await expect(page.getByTestId('process-row')).toHaveCount(6);
         }
       },
       {
@@ -485,6 +488,47 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Last Annke alert is shown',
         check: async () => {
           await expect(page.getByText('Last alert: vehicle active 4 seconds ago')).toBeVisible();
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-history').click();
+  await tester.step('recording-history', {
+    description: 'Observed events are linked to retained recordings',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'History tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible();
+          await expect(page.getByTestId('tab-history')).toHaveAttribute('aria-current', 'page');
+        }
+      },
+      {
+        spec: 'Storage estimate is shown',
+        check: async () => {
+          await expect(page.getByTestId('recording-storage')).toContainText('Estimated total');
+          await expect(page.getByTestId('recording-storage')).toContainText('Observed on disk');
+        }
+      },
+      {
+        spec: 'Vehicle event is shown in history',
+        check: async () => {
+          await expect(page.getByTestId('history-event-row')).toHaveCount(1);
+          await expect(page.getByRole('button', { name: /Vehicle/ })).toBeVisible();
+          await expect(page.getByTestId('history-event-row').getByText('full quality')).toBeVisible();
+        }
+      },
+      {
+        spec: 'Recording player jumps to the event segment',
+        check: async () => {
+          await page.getByRole('button', { name: /Vehicle/ }).click();
+          await expect(page.getByTestId('recording-player')).toBeVisible();
+          await expect(page.getByTestId('recording-video')).toHaveAttribute(
+            'src',
+            /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
+          );
         }
       }
     ]
@@ -669,6 +713,62 @@ function observedAnnkeAi(observedAtMs: number): DiscoveredCamera['annke'] {
   };
 }
 
+function emptyRecordings(): CameraDiscoveryState['recordings'] {
+  return {
+    segments: [],
+    events: [],
+    storage: {
+      cameraCount: 0,
+      mainRetentionDays: 7,
+      subRetentionDays: 30,
+      mainEstimatedBytes: 0,
+      subEstimatedBytes: 0,
+      totalEstimatedBytes: 0,
+      observedBytes: 0
+    }
+  };
+}
+
+function recordingState(eventAtMs: number): CameraDiscoveryState['recordings'] {
+  const segment = {
+    cameraId: 'uuid:driveway-camera',
+    role: 'main' as const,
+    streamName: 'driveway_main',
+    startMs: 1781099196000,
+    endMs: 1781099256000,
+    durationMs: 60000,
+    sizeBytes: 32000000,
+    relativePath: 'driveway_main/1781099196.mp4',
+    observedAtMs: eventAtMs + 1000
+  };
+
+  return {
+    segments: [segment],
+    events: [
+      {
+        id: 'annke-alert-vehicle-1',
+        cameraId: 'uuid:driveway-camera',
+        occurredAtMs: eventAtMs,
+        eventType: 'VMD',
+        eventState: 'active',
+        targetType: 'vehicle',
+        label: 'Vehicle',
+        sourceEventId: 'annke-alert-vehicle-1',
+        preferredSegment: segment
+      }
+    ],
+    storage: {
+      cameraCount: 1,
+      mainRetentionDays: 7,
+      subRetentionDays: 30,
+      mainEstimatedBytes: 642600000000,
+      subEstimatedBytes: 226800000000,
+      totalEstimatedBytes: 869400000000,
+      observedBytes: segment.sizeBytes
+    }
+  };
+}
+
 function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes'] {
   return [
     {
@@ -720,6 +820,16 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       lastEventType: 'system.process.heartbeat',
       health: 'ok',
       detail: 'Verifies server task health and sends failure notifications'
+    },
+    {
+      id: 'patrol-recorder',
+      label: 'Recording worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Records main and sub streams into retained video segments'
     }
   ];
 }

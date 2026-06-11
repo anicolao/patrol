@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { browser } from '$app/environment';
-  import type { CameraDiscoveryState, DiscoveredCamera } from '$lib/cameras/discovery';
+  import type {
+    CameraDiscoveryState,
+    DiscoveredCamera,
+    ReviewableSecurityEvent
+  } from '$lib/cameras/discovery';
 
-  type Tab = 'cameras' | 'settings' | 'health';
+  type Tab = 'cameras' | 'history' | 'settings' | 'health';
   type LiveEventConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
   type LiveEventEntry = {
     receivedAtMs: number;
@@ -15,6 +19,7 @@
   };
 
   const liveEventPort = '5186';
+  const stateReloadDebounceMs = 2500;
 
   let discoveryState: CameraDiscoveryState | null = null;
   let error: string | null = null;
@@ -23,12 +28,16 @@
   let observingAnnkeAi = false;
   let hydrated = false;
   let activeTab: Tab = 'cameras';
+  let selectedReviewEventId: string | null = null;
   let nowMs = Date.now();
   let credentialStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
   let liveEventStatus: LiveEventConnectionState = 'connecting';
   let liveEventError: string | null = null;
   let liveEventUrl = '';
   let liveEvents: LiveEventEntry[] = [];
+  let stateReloadTimer: number | null = null;
+  let stateReloadInFlight = false;
+  let stateReloadQueued = false;
 
   onMount(() => {
     hydrated = true;
@@ -45,20 +54,46 @@
     return () => {
       window.clearInterval(interval);
       window.clearInterval(heartbeatInterval);
+      if (stateReloadTimer) {
+        window.clearTimeout(stateReloadTimer);
+      }
       stopEventSocket?.();
     };
   });
 
   async function loadDiscoveryState() {
+    if (stateReloadInFlight) {
+      stateReloadQueued = true;
+      return;
+    }
+
+    stateReloadInFlight = true;
     try {
-      const response = await fetch('/api/cameras/discover');
+      const response = await fetch('/api/state');
       if (!response.ok) {
-        throw new Error(`Discovery state failed with HTTP ${response.status}`);
+        throw new Error(`State replay failed with HTTP ${response.status}`);
       }
       discoveryState = (await response.json()) as CameraDiscoveryState;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
+    } finally {
+      stateReloadInFlight = false;
+      if (stateReloadQueued) {
+        stateReloadQueued = false;
+        scheduleStateReload();
+      }
     }
+  }
+
+  function scheduleStateReload() {
+    if (stateReloadTimer) {
+      return;
+    }
+
+    stateReloadTimer = window.setTimeout(() => {
+      stateReloadTimer = null;
+      void loadDiscoveryState();
+    }, stateReloadDebounceMs);
   }
 
   async function discoverCameras() {
@@ -150,8 +185,8 @@
         liveEventError = null;
         const liveEvent = summarizeLiveEvent(event.data);
         liveEvents = [liveEvent, ...liveEvents].slice(0, 30);
-        if (liveEvent.messageType === 'patrol.event.appended') {
-          void loadDiscoveryState();
+        if (shouldReloadStateForLiveEvent(liveEvent)) {
+          scheduleStateReload();
         }
       });
 
@@ -216,6 +251,31 @@
     }
   }
 
+  function shouldReloadStateForLiveEvent(event: LiveEventEntry) {
+    if (event.messageType !== 'patrol.event.appended') {
+      return false;
+    }
+
+    switch (event.eventType) {
+      case 'system.process.heartbeat':
+        return false;
+      case 'annke.alert_stream.message_received':
+        return event.summary.includes('VMD') || event.summary.includes('human') || event.summary.includes('vehicle');
+      case 'recording.segment.observed':
+      case 'recording.segment.expired':
+      case 'camera.credentials.saved':
+      case 'go2rtc.config.materialized':
+      case 'go2rtc.streams.observed':
+      case 'annke.isapi.response.observed':
+      case 'system.process.exited':
+      case 'system.watchdog.check_completed':
+      case 'system.watchdog.notification_sent':
+        return true;
+      default:
+        return false;
+    }
+  }
+
   function summarizeLiveEventPayload(payload: Record<string, unknown> | undefined) {
     if (!payload) {
       return 'connection message';
@@ -262,6 +322,10 @@
 
   function cameraPath(camera: DiscoveredCamera) {
     return `/cameras/${encodeURIComponent(camera.id)}`;
+  }
+
+  function cameraById(cameraId: string) {
+    return discoveryState?.devices.find((camera) => camera.id === cameraId) ?? null;
   }
 
   function go2rtcStreamPath(camera: DiscoveredCamera, stream: 'main' | 'sub') {
@@ -351,6 +415,60 @@
     return tsMs ? `${timeAgo(tsMs, nowMs)} ago` : 'never';
   }
 
+  function formatDateTime(tsMs: number) {
+    return new Date(tsMs).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function formatBytes(bytes: number) {
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = bytes / 1024;
+    for (const unit of units) {
+      if (value < 1024 || unit === units.at(-1)) {
+        return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${unit}`;
+      }
+      value /= 1024;
+    }
+
+    return `${bytes} B`;
+  }
+
+  function selectedReviewEvent() {
+    const events = discoveryState?.recordings.events ?? [];
+    return events.find((event) => event.id === selectedReviewEventId) ?? events.find((event) => event.preferredSegment) ?? null;
+  }
+
+  function selectReviewEvent(event: ReviewableSecurityEvent) {
+    selectedReviewEventId = event.id;
+  }
+
+  function recordingSource(event: ReviewableSecurityEvent) {
+    const segment = event.preferredSegment;
+    if (!segment) {
+      return null;
+    }
+
+    const params = new URLSearchParams({ path: segment.relativePath });
+    const offsetSeconds = Math.max(0, Math.floor((event.occurredAtMs - segment.startMs) / 1000));
+    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
+  }
+
+  function recordingQualityLabel(event: ReviewableSecurityEvent) {
+    if (!event.preferredSegment) {
+      return 'no recording';
+    }
+
+    return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
+  }
+
   function greenProcessCount() {
     return (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
   }
@@ -419,7 +537,13 @@
     <div>
       <p class="eyebrow">Patrol</p>
       <h1>
-        {activeTab === 'cameras' ? 'Cameras' : activeTab === 'settings' ? 'Settings' : 'System Health'}
+        {activeTab === 'cameras'
+          ? 'Cameras'
+          : activeTab === 'history'
+            ? 'History'
+            : activeTab === 'settings'
+              ? 'Settings'
+              : 'System Health'}
       </h1>
     </div>
     {#if discoveryState?.lastDiscovery}
@@ -466,6 +590,98 @@
           <p>Use Settings to discover cameras and save credentials before live views appear here.</p>
           <button type="button" disabled={!hydrated} onclick={() => (activeTab = 'settings')}>Open Settings</button>
         </section>
+      {/if}
+    </section>
+  {:else if activeTab === 'history'}
+    <section class="view" aria-labelledby="history-title">
+      <div class="section-header">
+        <div>
+          <h2 id="history-title">Recorded Events</h2>
+          <p>Review camera-side vehicle, person, and motion events against retained recordings.</p>
+          <p class="event-path">Recordings keep main stream quality for 7 days and substream quality for 30 days.</p>
+        </div>
+      </div>
+
+      {#if discoveryState?.recordings}
+        <div class="storage-summary" data-testid="recording-storage">
+          <div>
+            <span>Estimated total</span>
+            <strong>{formatBytes(discoveryState.recordings.storage.totalEstimatedBytes)}</strong>
+          </div>
+          <div>
+            <span>Full quality</span>
+            <strong>{formatBytes(discoveryState.recordings.storage.mainEstimatedBytes)}</strong>
+          </div>
+          <div>
+            <span>Substream</span>
+            <strong>{formatBytes(discoveryState.recordings.storage.subEstimatedBytes)}</strong>
+          </div>
+          <div>
+            <span>Observed on disk</span>
+            <strong>{formatBytes(discoveryState.recordings.storage.observedBytes)}</strong>
+          </div>
+        </div>
+
+        {#if selectedReviewEvent()}
+          {@const selectedEvent = selectedReviewEvent()}
+          {#if selectedEvent}
+            <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
+              <div class="recording-player-header">
+                <div>
+                  <h3>{selectedEvent.label}</h3>
+                  <p>
+                    {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                    · {formatDateTime(selectedEvent.occurredAtMs)}
+                    · {recordingQualityLabel(selectedEvent)}
+                  </p>
+                </div>
+              </div>
+              {#if recordingSource(selectedEvent)}
+                <!-- svelte-ignore a11y_media_has_caption -->
+                <video
+                  src={recordingSource(selectedEvent) ?? undefined}
+                  controls
+                  playsinline
+                  preload="metadata"
+                  data-testid="recording-video"
+                ></video>
+              {:else}
+                <p class="notice compact">
+                  No retained recording segment currently overlaps this event.
+                </p>
+              {/if}
+            </section>
+          {/if}
+        {/if}
+
+        {#if discoveryState.recordings.events.length > 0}
+          <ol class="history-list" aria-label="Observed security events">
+            {#each discoveryState.recordings.events as event}
+              <li data-testid="history-event-row">
+                <button
+                  type="button"
+                  class="history-event"
+                  class:active={event.id === selectedReviewEventId}
+                  disabled={!event.preferredSegment}
+                  onclick={() => selectReviewEvent(event)}
+                >
+                  <span>
+                    <strong>{event.label}</strong>
+                    <small>
+                      {cameraById(event.cameraId)?.name ?? cameraById(event.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(event.occurredAtMs)}
+                    </small>
+                  </span>
+                  <span>{recordingQualityLabel(event)}</span>
+                </button>
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <p class="notice">No vehicle, person, or motion events have been observed yet.</p>
+        {/if}
+      {:else}
+        <p class="notice">Recording state has not been replayed yet.</p>
       {/if}
     </section>
   {:else if activeTab === 'settings'}
@@ -803,6 +1019,22 @@
   </button>
   <button
     type="button"
+    class:active={activeTab === 'history'}
+    aria-label="History"
+    aria-current={activeTab === 'history' ? 'page' : undefined}
+    data-testid="tab-history"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'history')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+      <path d="M3 4v5h5"></path>
+      <path d="M12 7v5l3 2"></path>
+    </svg>
+    <span>History</span>
+  </button>
+  <button
+    type="button"
     class:active={activeTab === 'health'}
     aria-label="System health"
     aria-current={activeTab === 'health' ? 'page' : undefined}
@@ -1047,7 +1279,8 @@
 
   .camera-grid,
   .settings-list,
-  .health-list {
+  .health-list,
+  .history-list {
     display: grid;
     gap: 12px;
     margin: 0;
@@ -1058,7 +1291,8 @@
   .camera-tile,
   .settings-card,
   .health-card,
-  .empty-state {
+  .empty-state,
+  .recording-player {
     border: 1px solid #d9dde2;
     border-radius: 8px;
     background: #ffffff;
@@ -1093,6 +1327,103 @@
 
   .camera-tile-footer a {
     min-width: 72px;
+  }
+
+  .storage-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .storage-summary div {
+    display: grid;
+    gap: 4px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 12px;
+  }
+
+  .storage-summary span,
+  .history-event small,
+  .recording-player p {
+    color: #66727f;
+  }
+
+  .storage-summary span {
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .storage-summary strong {
+    font-size: 1rem;
+  }
+
+  .recording-player {
+    display: grid;
+    gap: 12px;
+    margin-bottom: 12px;
+    padding: 14px;
+  }
+
+  .recording-player-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .recording-player h3,
+  .recording-player p {
+    margin-bottom: 0;
+  }
+
+  .recording-player video {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 6px;
+    background: #111827;
+  }
+
+  .history-list li {
+    margin: 0;
+  }
+
+  .history-event {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    border-color: #d9dde2;
+    background: #ffffff;
+    color: #171a1f;
+    padding: 12px;
+    text-align: left;
+  }
+
+  .history-event:disabled {
+    cursor: default;
+  }
+
+  .history-event.active {
+    border-color: #1f4f82;
+    background: #f2f7fc;
+  }
+
+  .history-event > span:first-child {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .history-event > span:last-child {
+    color: #3d4752;
+    font-size: 0.82rem;
+    font-weight: 700;
+    white-space: nowrap;
   }
 
   .empty-state {
@@ -1411,7 +1742,7 @@
     left: 0;
     z-index: 10;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 4px;
     border-top: 1px solid #d5d8dc;
     background: rgb(255 255 255 / 0.96);

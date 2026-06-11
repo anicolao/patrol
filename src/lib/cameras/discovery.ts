@@ -24,6 +24,48 @@ export interface DiscoveredCamera {
   annke: AnnkeCameraAiStatus | null;
 }
 
+export type RecordingStreamRole = 'main' | 'sub';
+
+export interface RecordingSegment {
+  cameraId: string;
+  role: RecordingStreamRole;
+  streamName: string;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  sizeBytes: number;
+  relativePath: string;
+  observedAtMs: number;
+}
+
+export interface ReviewableSecurityEvent {
+  id: string;
+  cameraId: string;
+  occurredAtMs: number;
+  eventType: string | null;
+  eventState: string | null;
+  targetType: string | null;
+  label: string;
+  sourceEventId: string;
+  preferredSegment: RecordingSegment | null;
+}
+
+export interface RecordingStorageEstimate {
+  cameraCount: number;
+  mainRetentionDays: number;
+  subRetentionDays: number;
+  mainEstimatedBytes: number;
+  subEstimatedBytes: number;
+  totalEstimatedBytes: number;
+  observedBytes: number;
+}
+
+export interface RecordingState {
+  segments: RecordingSegment[];
+  events: ReviewableSecurityEvent[];
+  storage: RecordingStorageEstimate;
+}
+
 export type AnnkeAiHealth = 'unknown' | 'motion_enabled' | 'alert_idle' | 'alert_active' | 'error';
 
 export interface AnnkeCameraAiStatus {
@@ -108,6 +150,7 @@ export interface CameraDiscoveryState {
   staleAfterMs: number;
   processes: SystemProcessStatus[];
   devices: DiscoveredCamera[];
+  recordings: RecordingState;
   errors: string[];
   lastDiscovery: {
     runId: string;

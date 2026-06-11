@@ -93,9 +93,21 @@
 
 ---
 
+## Observed events are linked to retained recordings
+
+![Observed events are linked to retained recordings](./screenshots/008-recording-history.png)
+
+**Verifications:**
+- [x] History tab is selected
+- [x] Storage estimate is shown
+- [x] Vehicle event is shown in history
+- [x] Recording player jumps to the event segment
+
+---
+
 ## High-resolution live camera view is shown
 
-![High-resolution live camera view is shown](./screenshots/008-live-view.png)
+![High-resolution live camera view is shown](./screenshots/009-live-view.png)
 
 **Verifications:**
 - [x] Live camera route opens from the preview card
@@ -105,7 +117,7 @@
 
 ## Settings timestamp labels refresh without reload
 
-![Settings timestamp labels refresh without reload](./screenshots/009-refreshed-times.png)
+![Settings timestamp labels refresh without reload](./screenshots/010-refreshed-times.png)
 
 **Verifications:**
 - [x] Last discovery age advances after one minute
@@ -116,7 +128,7 @@
 
 ## Health timestamp labels refresh without reload
 
-![Health timestamp labels refresh without reload](./screenshots/010-health-refreshed-times.png)
+![Health timestamp labels refresh without reload](./screenshots/011-health-refreshed-times.png)
 
 **Verifications:**
 - [x] go2rtc observed age advances after one minute
