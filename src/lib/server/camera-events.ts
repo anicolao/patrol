@@ -8,7 +8,11 @@ import type {
   Go2rtcCameraStatus,
   Go2rtcStreamRole,
   Go2rtcStreamStatus,
-  RawProbeResponse
+  RawProbeResponse,
+  RecordingSegment,
+  RecordingState,
+  RecordingStreamRole,
+  ReviewableSecurityEvent
 } from '$lib/cameras/discovery';
 import type { SystemProcessStatus } from '$lib/cameras/discovery';
 import { appendEvent, readEvents, type PatrolEvent } from '$lib/server/event-store';
@@ -17,6 +21,10 @@ import { readSystemEvents, type SystemProcessHeartbeatPayload } from '$lib/serve
 const CAMERA_STREAM = 'cameras';
 const DISCOVERY_STALE_AFTER_MS = 60 * 60 * 1000;
 const PROCESS_STALE_AFTER_MS = 90 * 1000;
+const MAIN_RECORDING_RETENTION_DAYS = 7;
+const SUB_RECORDING_RETENTION_DAYS = 30;
+const MAIN_ESTIMATED_BITS_PER_SECOND = 8_500_000;
+const SUB_ESTIMATED_BITS_PER_SECOND = 700_000;
 
 const SYSTEM_PROCESS_TASKS: Array<
   Pick<SystemProcessStatus, 'id' | 'label' | 'kind' | 'expectedEveryMs'> & { detail: string }
@@ -55,6 +63,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Verifies server task health and sends failure notifications'
+  },
+  {
+    id: 'patrol-recorder',
+    label: 'Recording worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Records main and sub streams into retained video segments'
   }
 ];
 
@@ -128,6 +143,25 @@ export interface AnnkeAlertStreamMessageReceivedPayload {
   sourcePath: '/ISAPI/Event/notification/alertStream';
   receivedAtMs: number;
   rawXml: string;
+}
+
+export interface RecordingSegmentObservedPayload {
+  cameraId: string;
+  role: RecordingStreamRole;
+  streamName: string;
+  startMs: number;
+  durationMs: number;
+  sizeBytes: number;
+  relativePath: string;
+}
+
+export interface RecordingSegmentExpiredPayload {
+  cameraId: string;
+  role: RecordingStreamRole;
+  streamName: string;
+  startMs: number;
+  relativePath: string;
+  retentionDays: number;
 }
 
 interface SystemProcessExitedPayload extends SystemProcessHeartbeatPayload {
@@ -207,6 +241,22 @@ export async function appendAnnkeAlertStreamMessageReceived(
   });
 }
 
+export async function appendRecordingSegmentObserved(payload: RecordingSegmentObservedPayload) {
+  return await appendEvent<RecordingSegmentObservedPayload>(CAMERA_STREAM, {
+    type: 'recording.segment.observed',
+    source: 'patrol-recorder',
+    payload
+  });
+}
+
+export async function appendRecordingSegmentExpired(payload: RecordingSegmentExpiredPayload) {
+  return await appendEvent<RecordingSegmentExpiredPayload>(CAMERA_STREAM, {
+    type: 'recording.segment.expired',
+    source: 'patrol-recorder',
+    payload
+  });
+}
+
 export async function currentCameraDiscoveryState(): Promise<CameraDiscoveryState> {
   return reduceCameraDiscoveryEvents(await readEvents(CAMERA_STREAM), await readSystemEvents());
 }
@@ -219,6 +269,9 @@ export function reduceCameraDiscoveryEvents(
   const credentialsByCameraId = new Map<string, DiscoveredCamera['credentials']>();
   const go2rtcConfigsByCameraId = new Map<string, Go2rtcCameraConfig>();
   const annkeStateByCameraId = new Map<string, AnnkeCameraAiReducerState>();
+  const recordingSegmentsByPath = new Map<string, RecordingSegment>();
+  const expiredRecordingPaths = new Set<string>();
+  const alertEvents: Array<PatrolEvent<AnnkeAlertStreamMessageReceivedPayload>> = [];
   let latestCompleted: PatrolEvent<DiscoveryCompletedPayload> | null = null;
   let latestGo2rtcObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null = null;
   const nowMs = Date.now();
@@ -274,8 +327,34 @@ export function reduceCameraDiscoveryEvents(
       const state = annkeStateByCameraId.get(message.payload.cameraId) ?? {};
       if (isAnnkeAiAlert(message.payload.rawXml)) {
         state.lastAlert = message;
+        alertEvents.push(message);
       }
       annkeStateByCameraId.set(message.payload.cameraId, state);
+      continue;
+    }
+
+    if (event.type === 'recording.segment.observed') {
+      const observed = event as PatrolEvent<RecordingSegmentObservedPayload>;
+      if (!expiredRecordingPaths.has(observed.payload.relativePath) && observed.payload.sizeBytes > 0) {
+        recordingSegmentsByPath.set(observed.payload.relativePath, {
+          cameraId: observed.payload.cameraId,
+          role: observed.payload.role,
+          streamName: observed.payload.streamName,
+          startMs: observed.payload.startMs,
+          endMs: observed.payload.startMs + observed.payload.durationMs,
+          durationMs: observed.payload.durationMs,
+          sizeBytes: observed.payload.sizeBytes,
+          relativePath: observed.payload.relativePath,
+          observedAtMs: observed.ts_ms
+        });
+      }
+      continue;
+    }
+
+    if (event.type === 'recording.segment.expired') {
+      const expired = event as PatrolEvent<RecordingSegmentExpiredPayload>;
+      expiredRecordingPaths.add(expired.payload.relativePath);
+      recordingSegmentsByPath.delete(expired.payload.relativePath);
       continue;
     }
 
@@ -332,22 +411,29 @@ export function reduceCameraDiscoveryEvents(
       staleAfterMs: DISCOVERY_STALE_AFTER_MS,
       processes: reduceSystemProcesses(events, systemEvents),
       devices: [],
+      recordings: buildRecordingState([], [], 0),
       errors: [],
       lastDiscovery: null
     };
   }
 
   const rawResult = latestCompleted.payload.rawResult;
+  const devices = Array.from(devicesById.values())
+    .filter((device) => device.credentials || nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
+    .sort((a, b) => {
+      const left = a.name ?? a.remoteAddress;
+      const right = b.name ?? b.remoteAddress;
+      return left.localeCompare(right);
+    });
+  const recordingSegments = Array.from(recordingSegmentsByPath.values()).sort(
+    (a, b) => b.startMs - a.startMs || a.relativePath.localeCompare(b.relativePath)
+  );
+
   return {
     staleAfterMs: DISCOVERY_STALE_AFTER_MS,
     processes: reduceSystemProcesses(events, systemEvents),
-    devices: Array.from(devicesById.values())
-      .filter((device) => device.credentials || nowMs - device.lastSeenAtMs <= DISCOVERY_STALE_AFTER_MS)
-      .sort((a, b) => {
-        const left = a.name ?? a.remoteAddress;
-        const right = b.name ?? b.remoteAddress;
-        return left.localeCompare(right);
-      }),
+    devices,
+    recordings: buildRecordingState(recordingSegments, alertEvents, devices.length),
     errors: rawResult.errors,
     lastDiscovery: {
       runId: latestCompleted.correlation_id ?? latestCompleted.id,
@@ -429,6 +515,16 @@ function reduceSystemProcesses(
         healthOverride: null
       });
     }
+
+    if (event.type === 'recording.segment.observed') {
+      const observed = event as PatrolEvent<RecordingSegmentObservedPayload>;
+      updateProcessEvent(latestByProcessId, 'patrol-recorder', {
+        tsMs: observed.ts_ms,
+        eventType: observed.type,
+        detail: `${observed.payload.role} segment recorded for ${observed.payload.streamName}`,
+        healthOverride: null
+      });
+    }
   }
 
   return SYSTEM_PROCESS_TASKS.map((task) => {
@@ -453,6 +549,93 @@ function reduceSystemProcesses(
       detail: latest?.detail ?? task.detail
     };
   });
+}
+
+function buildRecordingState(
+  segments: RecordingSegment[],
+  alertEvents: Array<PatrolEvent<AnnkeAlertStreamMessageReceivedPayload>>,
+  cameraCount: number
+): RecordingState {
+  const activeAlertEvents = alertEvents
+    .filter((event) => {
+      const state = textForTag(event.payload.rawXml, 'eventState');
+      return !state || state === 'active';
+    })
+    .sort((a, b) => b.payload.receivedAtMs - a.payload.receivedAtMs || a.id.localeCompare(b.id));
+
+  const events: ReviewableSecurityEvent[] = activeAlertEvents.map((event) => {
+    const eventType = textForTag(event.payload.rawXml, 'eventType');
+    const eventState = textForTag(event.payload.rawXml, 'eventState');
+    const targetType = textForTag(event.payload.rawXml, 'targetType');
+    return {
+      id: event.id,
+      cameraId: event.payload.cameraId,
+      occurredAtMs: event.payload.receivedAtMs,
+      eventType,
+      eventState,
+      targetType,
+      label: recordingEventLabel(targetType, eventType),
+      sourceEventId: event.id,
+      preferredSegment: preferredSegmentForEvent(segments, event.payload.cameraId, event.payload.receivedAtMs)
+    };
+  });
+
+  return {
+    segments,
+    events,
+    storage: {
+      cameraCount,
+      mainRetentionDays: MAIN_RECORDING_RETENTION_DAYS,
+      subRetentionDays: SUB_RECORDING_RETENTION_DAYS,
+      mainEstimatedBytes: estimateBytes(cameraCount, MAIN_ESTIMATED_BITS_PER_SECOND, MAIN_RECORDING_RETENTION_DAYS),
+      subEstimatedBytes: estimateBytes(cameraCount, SUB_ESTIMATED_BITS_PER_SECOND, SUB_RECORDING_RETENTION_DAYS),
+      totalEstimatedBytes:
+        estimateBytes(cameraCount, MAIN_ESTIMATED_BITS_PER_SECOND, MAIN_RECORDING_RETENTION_DAYS) +
+        estimateBytes(cameraCount, SUB_ESTIMATED_BITS_PER_SECOND, SUB_RECORDING_RETENTION_DAYS),
+      observedBytes: segments.reduce((total, segment) => total + segment.sizeBytes, 0)
+    }
+  };
+}
+
+function preferredSegmentForEvent(segments: RecordingSegment[], cameraId: string, occurredAtMs: number) {
+  const ageMs = Date.now() - occurredAtMs;
+  const preferredRoles: RecordingStreamRole[] =
+    ageMs <= MAIN_RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000 ? ['main', 'sub'] : ['sub'];
+
+  for (const role of preferredRoles) {
+    const segment = segments.find(
+      (candidate) =>
+        candidate.cameraId === cameraId &&
+        candidate.role === role &&
+        occurredAtMs >= candidate.startMs &&
+        occurredAtMs <= candidate.endMs
+    );
+    if (segment) {
+      return segment;
+    }
+  }
+
+  return null;
+}
+
+function recordingEventLabel(targetType: string | null, eventType: string | null) {
+  if (targetType === 'human') {
+    return 'Person';
+  }
+  if (targetType === 'vehicle') {
+    return 'Vehicle';
+  }
+  if (targetType) {
+    return targetType;
+  }
+  if (eventType === 'VMD') {
+    return 'Motion';
+  }
+  return eventType ?? 'Camera event';
+}
+
+function estimateBytes(cameraCount: number, bitsPerSecond: number, days: number) {
+  return Math.round((cameraCount * bitsPerSecond * days * 24 * 60 * 60) / 8);
 }
 
 function updateProcessEvent(

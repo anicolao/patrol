@@ -4,7 +4,7 @@ import type { CameraDiscoveryState } from '$lib/cameras/discovery';
 export const ssr = false;
 
 export async function load({ params, fetch }) {
-  const response = await fetch('/api/cameras/discover');
+  const response = await fetch('/api/state');
   if (!response.ok) {
     error(response.status, `Camera state failed with HTTP ${response.status}.`);
   }
