@@ -142,14 +142,31 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: JSON.stringify(discoveryState)
     });
   });
-  await page.route('**/api/system/heartbeat', async (route) => {
+  await page.route('**/api/system/heartbeat**', async (route) => {
     discoveryState = {
       ...discoveryState,
       processes: systemProcesses(fixedNowMs - 5000)
     };
     await route.fulfill({
       contentType: 'application/json',
-      body: JSON.stringify(discoveryState)
+      body: JSON.stringify({
+        stream: 'system',
+        event: {
+          id: 'heartbeat-1',
+          ts_ms: fixedNowMs - 5000,
+          schema: 1,
+          type: 'system.process.heartbeat',
+          source: 'patrol-web',
+          payload: {
+            processId: 'patrol-web',
+            label: 'Patrol web/API server',
+            kind: 'server',
+            pid: 123,
+            host: null,
+            detail: 'SvelteKit API heartbeat route responded'
+          }
+        }
+      })
     });
   });
   let credentialRequest: unknown = null;
@@ -609,6 +626,159 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   });
 
   tester.generateDocs();
+});
+
+test('cached snapshot boots without fetching server state', async ({ page }) => {
+  const fixedNowMs = 1781099200000;
+  const cachedSnapshot = {
+    state: {
+      staleAfterMs: 60 * 60 * 1000,
+      processes: systemProcesses(fixedNowMs - 15000),
+      devices: [
+        {
+          id: 'uuid:driveway-camera',
+          endpoint: 'uuid:driveway-camera',
+          remoteAddress: '10.20.240.193',
+          lastSeenAtMs: fixedNowMs - 90000,
+          xaddrs: ['http://10.20.240.193/onvif/device_service'],
+          setupUrl: 'http://10.20.240.193',
+          scopes: [
+            'onvif://www.onvif.org/name/driveway',
+            'onvif://www.onvif.org/hardware/Annke%20C800'
+          ],
+          types: ['dn:NetworkVideoTransmitter'],
+          name: 'driveway',
+          hardware: 'Annke C800',
+          location: null,
+          vendorHint: 'annke',
+          streams: {
+            main: 'driveway_main',
+            sub: 'driveway_sub'
+          },
+          credentials: {
+            savedAtMs: fixedNowMs - 30000,
+            usernameSecretId: 'camera.uuid:driveway-camera.username',
+            passwordSecretId: 'camera.uuid:driveway-camera.password'
+          },
+          go2rtc: configuredGo2rtc(fixedNowMs - 20000),
+          annke: null
+        }
+      ],
+      recordings: emptyRecordings(),
+      errors: [],
+      lastDiscovery: {
+        runId: 'cached-discovery',
+        protocol: 'onvif-ws-discovery',
+        startedAtMs: fixedNowMs - 120042,
+        durationMs: 42,
+        completedAtMs: fixedNowMs - 120000
+      }
+    },
+    cursor: {
+      ts_ms: fixedNowMs - 100,
+      id: 'cached-cursor'
+    },
+    cachedAtMs: fixedNowMs - 50
+  };
+  let stateRequests = 0;
+
+  await page.clock.install({ time: fixedNowMs });
+  await page.addInitScript((snapshot) => {
+    window.localStorage.setItem('patrol.camera_state.v2', JSON.stringify(snapshot));
+  }, cachedSnapshot);
+  await page.addInitScript(() => {
+    class PatrolWebSocketMock extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      readonly url: string;
+      readyState = PatrolWebSocketMock.CONNECTING;
+
+      constructor(url: string) {
+        super();
+        this.url = url;
+        (window as unknown as { __patrolWsUrl?: string }).__patrolWsUrl = url;
+        window.setTimeout(() => {
+          this.readyState = PatrolWebSocketMock.OPEN;
+          this.dispatchEvent(new Event('open'));
+          this.dispatchEvent(
+            new MessageEvent('message', {
+              data: JSON.stringify({
+                type: 'patrol.event_stream.connected',
+                ts_ms: Date.now(),
+                streams: ['cameras', 'system']
+              })
+            })
+          );
+        }, 0);
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = PatrolWebSocketMock.CLOSED;
+        this.dispatchEvent(new CloseEvent('close'));
+      }
+    }
+
+    Object.defineProperty(window, 'WebSocket', {
+      value: PatrolWebSocketMock
+    });
+  });
+
+  await page.route('**/api/state**', async (route) => {
+    stateRequests += 1;
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'The cached startup path should not request server state.' })
+    });
+  });
+  await page.route('**/api/system/heartbeat**', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        stream: 'system',
+        event: {
+          id: 'heartbeat-1',
+          ts_ms: fixedNowMs,
+          schema: 1,
+          type: 'system.process.heartbeat',
+          source: 'patrol-web',
+          payload: {
+            processId: 'patrol-web',
+            label: 'Patrol web/API server',
+            kind: 'server',
+            pid: 123,
+            host: null,
+            detail: 'SvelteKit API heartbeat route responded'
+          }
+        }
+      })
+    });
+  });
+  await page.route('http://localhost:1984/stream.html**', async (route) => {
+    const url = new URL(route.request().url());
+    const streamName = url.searchParams.get('src') ?? 'unknown';
+    await route.fulfill({
+      contentType: 'text/html',
+      body: go2rtcViewer(streamName)
+    });
+  });
+
+  await page.goto('/');
+
+  await expect(page.getByRole('heading', { name: 'driveway' })).toBeVisible();
+  await expect(page.getByText('No configured cameras')).toBeHidden();
+  await expect.poll(() => stateRequests).toBe(0);
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __patrolWsUrl?: string }).__patrolWsUrl ?? ''))
+    .toContain('after_ts_ms=1781099199900');
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __patrolWsUrl?: string }).__patrolWsUrl ?? ''))
+    .toContain('after_id=cached-cursor');
 });
 
 function go2rtcViewer(streamName: string) {

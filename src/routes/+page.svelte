@@ -6,6 +6,8 @@
     DiscoveredCamera,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
+  import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
+  import type { CameraStateSnapshot, EventCursor, PatrolEvent, StreamedPatrolEvent } from '$lib/events';
 
   type Tab = 'cameras' | 'history' | 'settings' | 'health';
   type LiveEventConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -19,9 +21,9 @@
   };
 
   const liveEventPort = '5186';
-  const stateReloadDebounceMs = 2500;
+  const localStateCacheKey = 'patrol.camera_state.v2';
 
-  let discoveryState: CameraDiscoveryState | null = null;
+  let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
   let discovering = false;
   let observingGo2rtc = false;
@@ -35,15 +37,39 @@
   let liveEventError: string | null = null;
   let liveEventUrl = '';
   let liveEvents: LiveEventEntry[] = [];
-  let stateReloadTimer: number | null = null;
   let stateReloadInFlight = false;
   let stateReloadQueued = false;
+  let configuredCameras: DiscoveredCamera[] = [];
+  let processGreenCount = 0;
+  let allProcessesGreen = false;
+  let selectedReviewEvent: ReviewableSecurityEvent | null = null;
+  let selectedRecordingSource: string | null = null;
+  let selectedRecordingQuality = 'no recording';
+  $: discoveryState = cameraSnapshot?.state ?? null;
+  $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
+  $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
+  $: allProcessesGreen =
+    (discoveryState?.processes.length ?? 0) > 0 &&
+    (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
+  $: selectedReviewEvent =
+    (discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ??
+    (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment) ??
+    null;
+  $: selectedRecordingSource = selectedReviewEvent ? recordingSource(selectedReviewEvent) : null;
+  $: selectedRecordingQuality = selectedReviewEvent ? recordingQualityLabel(selectedReviewEvent) : 'no recording';
 
   onMount(() => {
     hydrated = true;
-    void loadDiscoveryState();
+    const loadedCachedState = loadCachedDiscoveryState();
+    let stopEventSocket: (() => void) | null = null;
+    let stopped = false;
+    const bootstrap = loadedCachedState ? Promise.resolve() : loadDiscoveryState();
+    void bootstrap.finally(() => {
+      if (!stopped) {
+        stopEventSocket = connectEventSocket();
+      }
+    });
     void sendSystemHeartbeat();
-    const stopEventSocket = connectEventSocket();
     const interval = window.setInterval(() => {
       nowMs = Date.now();
     }, 60000);
@@ -52,16 +78,14 @@
     }, 30000);
 
     return () => {
+      stopped = true;
       window.clearInterval(interval);
       window.clearInterval(heartbeatInterval);
-      if (stateReloadTimer) {
-        window.clearTimeout(stateReloadTimer);
-      }
       stopEventSocket?.();
     };
   });
 
-  async function loadDiscoveryState() {
+  async function loadDiscoveryState(fresh = false) {
     if (stateReloadInFlight) {
       stateReloadQueued = true;
       return;
@@ -69,31 +93,20 @@
 
     stateReloadInFlight = true;
     try {
-      const response = await fetch('/api/state');
+      const response = await fetch(fresh ? '/api/state?fresh=1' : '/api/state');
       if (!response.ok) {
         throw new Error(`State replay failed with HTTP ${response.status}`);
       }
-      discoveryState = (await response.json()) as CameraDiscoveryState;
+      setCameraSnapshotFromPayload(await response.json());
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
       stateReloadInFlight = false;
       if (stateReloadQueued) {
         stateReloadQueued = false;
-        scheduleStateReload();
+        void loadDiscoveryState(true);
       }
     }
-  }
-
-  function scheduleStateReload() {
-    if (stateReloadTimer) {
-      return;
-    }
-
-    stateReloadTimer = window.setTimeout(() => {
-      stateReloadTimer = null;
-      void loadDiscoveryState();
-    }, stateReloadDebounceMs);
   }
 
   async function discoverCameras() {
@@ -105,7 +118,7 @@
       if (!response.ok) {
         throw new Error(`Discovery failed with HTTP ${response.status}`);
       }
-      discoveryState = (await response.json()) as CameraDiscoveryState;
+      setCameraSnapshotFromPayload(await response.json());
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
@@ -122,7 +135,7 @@
       if (!response.ok) {
         throw new Error(`go2rtc observation failed with HTTP ${response.status}`);
       }
-      discoveryState = (await response.json()) as CameraDiscoveryState;
+      setCameraSnapshotFromPayload(await response.json());
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
@@ -139,7 +152,7 @@
       if (!response.ok) {
         throw new Error(`Annke AI observation failed with HTTP ${response.status}`);
       }
-      discoveryState = (await response.json()) as CameraDiscoveryState;
+      setCameraSnapshotFromPayload(await response.json());
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     } finally {
@@ -149,9 +162,12 @@
 
   async function sendSystemHeartbeat() {
     try {
-      const response = await fetch('/api/system/heartbeat', { method: 'POST' });
-      if (response.ok) {
-        discoveryState = (await response.json()) as CameraDiscoveryState;
+      const response = await fetch('/api/system/heartbeat?event=1', { method: 'POST' });
+      if (response.ok && cameraSnapshot) {
+        const streamedEvent = await response.json();
+        if (isStreamedPatrolEvent(streamedEvent)) {
+          setCameraSnapshot(reduceCameraStateSnapshotEvent(cameraSnapshot, streamedEvent));
+        }
       }
     } catch {
       // The process dashboard will show stale/missing state once the API stops responding.
@@ -165,7 +181,12 @@
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname || 'localhost';
-    liveEventUrl = `${protocol}//${host}:${liveEventPort}/ws/events`;
+    liveEventUrl = cameraSnapshot?.cursor
+      ? `${protocol}//${host}:${liveEventPort}/ws/events?${new URLSearchParams({
+          after_ts_ms: String(cameraSnapshot.cursor.ts_ms),
+          after_id: cameraSnapshot.cursor.id
+        }).toString()}`
+      : `${protocol}//${host}:${liveEventPort}/ws/events`;
     liveEventStatus = 'connecting';
     liveEventError = null;
     let stopped = false;
@@ -185,8 +206,9 @@
         liveEventError = null;
         const liveEvent = summarizeLiveEvent(event.data);
         liveEvents = [liveEvent, ...liveEvents].slice(0, 30);
-        if (shouldReloadStateForLiveEvent(liveEvent)) {
-          scheduleStateReload();
+        const streamedEvent = parseStreamedEvent(event.data);
+        if (streamedEvent && cameraSnapshot) {
+          setCameraSnapshot(reduceCameraStateSnapshotEvent(cameraSnapshot, streamedEvent));
         }
       });
 
@@ -251,29 +273,112 @@
     }
   }
 
-  function shouldReloadStateForLiveEvent(event: LiveEventEntry) {
-    if (event.messageType !== 'patrol.event.appended') {
+  function parseStreamedEvent(data: string): StreamedPatrolEvent | null {
+    try {
+      const message = JSON.parse(data) as { type?: string } & Partial<StreamedPatrolEvent>;
+      if (message.type !== 'patrol.event.appended' || !isStreamedPatrolEvent(message)) {
+        return null;
+      }
+      return {
+        stream: message.stream,
+        event: message.event
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function isStreamedPatrolEvent(value: unknown): value is StreamedPatrolEvent {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const candidate = value as Partial<StreamedPatrolEvent>;
+    return typeof candidate.stream === 'string' && isPatrolEvent(candidate.event);
+  }
+
+  function isPatrolEvent(value: unknown): value is PatrolEvent {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const event = value as Partial<PatrolEvent>;
+    return (
+      typeof event.id === 'string' &&
+      typeof event.ts_ms === 'number' &&
+      typeof event.type === 'string' &&
+      typeof event.source === 'string'
+    );
+  }
+
+  function setCameraSnapshotFromPayload(payload: unknown) {
+    if (isCameraStateSnapshot(payload)) {
+      setCameraSnapshot(payload);
+      return;
+    }
+
+    setCameraSnapshot({
+      state: payload as CameraDiscoveryState,
+      cursor: cameraSnapshot?.cursor ?? null,
+      cachedAtMs: Date.now()
+    });
+  }
+
+  function setCameraSnapshot(snapshot: CameraStateSnapshot) {
+    cameraSnapshot = snapshot;
+    persistCameraSnapshot(snapshot);
+  }
+
+  function loadCachedDiscoveryState() {
+    if (!browser) {
       return false;
     }
 
-    switch (event.eventType) {
-      case 'system.process.heartbeat':
+    try {
+      const rawCache = window.localStorage.getItem(localStateCacheKey);
+      if (!rawCache) {
         return false;
-      case 'annke.alert_stream.message_received':
-        return event.summary.includes('VMD') || event.summary.includes('human') || event.summary.includes('vehicle');
-      case 'recording.segment.observed':
-      case 'recording.segment.expired':
-      case 'camera.credentials.saved':
-      case 'go2rtc.config.materialized':
-      case 'go2rtc.streams.observed':
-      case 'annke.isapi.response.observed':
-      case 'system.process.exited':
-      case 'system.watchdog.check_completed':
-      case 'system.watchdog.notification_sent':
-        return true;
-      default:
+      }
+      const snapshot = JSON.parse(rawCache) as CameraStateSnapshot;
+      if (!isCameraStateSnapshot(snapshot)) {
+        window.localStorage.removeItem(localStateCacheKey);
         return false;
+      }
+      cameraSnapshot = snapshot;
+      return true;
+    } catch {
+      window.localStorage.removeItem(localStateCacheKey);
+      return false;
     }
+  }
+
+  function persistCameraSnapshot(snapshot: CameraStateSnapshot) {
+    if (!browser) {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(localStateCacheKey, JSON.stringify(snapshot));
+    } catch {
+      // Browser storage is an optimization; the server state endpoint remains authoritative.
+    }
+  }
+
+  function isCameraStateSnapshot(value: unknown): value is CameraStateSnapshot {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const candidate = value as Partial<CameraStateSnapshot>;
+    return Boolean(candidate.state) && typeof candidate.cachedAtMs === 'number' && isEventCursorOrNull(candidate.cursor);
+  }
+
+  function isEventCursorOrNull(value: unknown): value is EventCursor | null {
+    if (value === null) {
+      return true;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const cursor = value as Partial<EventCursor>;
+    return typeof cursor.ts_ms === 'number' && typeof cursor.id === 'string';
   }
 
   function summarizeLiveEventPayload(payload: Record<string, unknown> | undefined) {
@@ -310,10 +415,6 @@
   function xmlTag(xml: string, tag: string) {
     const match = xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`));
     return match?.[1] ?? null;
-  }
-
-  function configuredCameras() {
-    return (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   }
 
   function displayName(camera: DiscoveredCamera) {
@@ -441,11 +542,6 @@
     return `${bytes} B`;
   }
 
-  function selectedReviewEvent() {
-    const events = discoveryState?.recordings.events ?? [];
-    return events.find((event) => event.id === selectedReviewEventId) ?? events.find((event) => event.preferredSegment) ?? null;
-  }
-
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
   }
@@ -467,15 +563,6 @@
     }
 
     return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
-  }
-
-  function greenProcessCount() {
-    return (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
-  }
-
-  function allProcessesGreen() {
-    const processes = discoveryState?.processes ?? [];
-    return processes.length > 0 && processes.every((process) => process.health === 'ok');
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -509,7 +596,7 @@
       if (!response.ok) {
         throw new Error(`Credential save failed with HTTP ${response.status}`);
       }
-      discoveryState = (await response.json()) as CameraDiscoveryState;
+      setCameraSnapshotFromPayload(await response.json());
 
       credentialStatus = {
         ...credentialStatus,
@@ -559,9 +646,9 @@
     <section class="view" aria-labelledby="cameras-title">
       <h2 id="cameras-title" class="sr-only">Camera streams</h2>
 
-      {#if configuredCameras().length > 0}
+      {#if configuredCameras.length > 0}
         <ul class="camera-grid" aria-label="Configured camera streams">
-          {#each configuredCameras() as camera}
+          {#each configuredCameras as camera}
             <li class="camera-tile">
               <iframe
                 src={go2rtcStreamPath(camera, 'sub')}
@@ -622,9 +709,8 @@
           </div>
         </div>
 
-        {#if selectedReviewEvent()}
-          {@const selectedEvent = selectedReviewEvent()}
-          {#if selectedEvent}
+        {#if selectedReviewEvent}
+          {@const selectedEvent = selectedReviewEvent}
             <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
               <div class="recording-player-header">
                 <div>
@@ -632,26 +718,27 @@
                   <p>
                     {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
                     · {formatDateTime(selectedEvent.occurredAtMs)}
-                    · {recordingQualityLabel(selectedEvent)}
+                    · {selectedRecordingQuality}
                   </p>
                 </div>
               </div>
-              {#if recordingSource(selectedEvent)}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video
-                  src={recordingSource(selectedEvent) ?? undefined}
-                  controls
-                  playsinline
-                  preload="metadata"
-                  data-testid="recording-video"
-                ></video>
+              {#if selectedRecordingSource}
+                {#key selectedRecordingSource}
+                  <!-- svelte-ignore a11y_media_has_caption -->
+                  <video
+                    src={selectedRecordingSource}
+                    controls
+                    playsinline
+                    preload="metadata"
+                    data-testid="recording-video"
+                  ></video>
+                {/key}
               {:else}
                 <p class="notice compact">
                   No retained recording segment currently overlaps this event.
                 </p>
               {/if}
             </section>
-          {/if}
         {/if}
 
         {#if discoveryState.recordings.events.length > 0}
@@ -802,17 +889,17 @@
     <section class="view" aria-labelledby="health-title">
       <section
         class="process-dashboard"
-        data-health={allProcessesGreen() ? 'ok' : 'attention'}
+        data-health={allProcessesGreen ? 'ok' : 'attention'}
         aria-labelledby="process-dashboard-title"
         data-testid="process-dashboard"
       >
         <div class="process-dashboard-header">
           <div>
             <h2 id="process-dashboard-title">Server Tasks</h2>
-            <p>{allProcessesGreen() ? 'All server tasks are green.' : 'One or more server tasks need attention.'}</p>
+            <p>{allProcessesGreen ? 'All server tasks are green.' : 'One or more server tasks need attention.'}</p>
           </div>
           <span class="process-score" data-testid="process-score">
-            {greenProcessCount()}/{discoveryState?.processes.length ?? 0} green
+            {processGreenCount}/{discoveryState?.processes.length ?? 0} green
           </span>
         </div>
         {#if discoveryState?.processes.length}
