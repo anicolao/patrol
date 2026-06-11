@@ -5,6 +5,7 @@ import {
 } from '$lib/server/camera-events';
 import { observeAnnkeAiCapabilities } from '$lib/server/annke-observer';
 import { readLatestCameraCredentials } from '$lib/server/secrets';
+import { currentCameraStateSnapshot } from '$lib/server/state-cache';
 
 export async function POST() {
   const state = await currentCameraDiscoveryState();
@@ -19,5 +20,5 @@ export async function POST() {
     await observeAnnkeAiCapabilities(credentials);
   }
 
-  return json(await currentCameraDiscoveryState());
+  return json(await currentCameraStateSnapshot({ forceRefresh: true }));
 }

@@ -40,11 +40,21 @@ const httpServer = createServer((request, response) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: '/ws/events' });
 
-wss.on('connection', (socket) => {
+wss.on('connection', (socket, request) => {
+  const cursor = cursorFromRequest(request);
   send(socket, {
     type: 'patrol.event_stream.connected',
     ts_ms: Date.now(),
-    streams
+    streams,
+    cursor
+  });
+
+  void sendCatchUpEvents(socket, cursor).catch((error) => {
+    send(socket, {
+      type: 'patrol.event_stream.catch_up_error',
+      ts_ms: Date.now(),
+      message: error instanceof Error ? error.message : String(error)
+    });
   });
 });
 
@@ -124,6 +134,47 @@ async function pollEventFiles() {
   }
 }
 
+async function sendCatchUpEvents(socket, cursor) {
+  if (!cursor) {
+    return;
+  }
+
+  const events = [];
+  for (const file of await listEventFiles()) {
+    const stream = streamFromFile(file);
+    const filePath = path.join(eventsDir, file);
+    const chunk = await readRange(filePath, 0, (await stat(filePath)).size);
+    for (const line of chunk.split('\n')) {
+      if (!line.trim()) {
+        continue;
+      }
+
+      const event = JSON.parse(line);
+      if (eventAfterCursor(event, cursor)) {
+        events.push({ stream, file, event });
+      }
+    }
+  }
+
+  events.sort((left, right) => compareEvents(left.event, right.event) || left.stream.localeCompare(right.stream));
+
+  for (const { stream, file, event } of events) {
+    send(socket, {
+      type: 'patrol.event.appended',
+      stream,
+      file,
+      event,
+      catchUp: true
+    });
+  }
+
+  send(socket, {
+    type: 'patrol.event_stream.catch_up_completed',
+    ts_ms: Date.now(),
+    sent: events.length
+  });
+}
+
 async function listEventFiles() {
   const entries = await readdir(eventsDir);
   return entries
@@ -156,6 +207,27 @@ function streamFromFile(file) {
   }
 
   return 'unknown';
+}
+
+function cursorFromRequest(request) {
+  const requestUrl = new URL(request.url ?? '/ws/events', `http://${request.headers.host ?? 'localhost'}`);
+  const tsMs = Number(requestUrl.searchParams.get('after_ts_ms'));
+  const id = requestUrl.searchParams.get('after_id');
+  if (!Number.isFinite(tsMs) || !id) {
+    return null;
+  }
+  return {
+    ts_ms: tsMs,
+    id
+  };
+}
+
+function eventAfterCursor(event, cursor) {
+  return event.ts_ms > cursor.ts_ms || (event.ts_ms === cursor.ts_ms && event.id > cursor.id);
+}
+
+function compareEvents(left, right) {
+  return left.ts_ms - right.ts_ms || left.id.localeCompare(right.id);
 }
 
 function broadcast(message) {

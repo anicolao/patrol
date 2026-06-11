@@ -1,4 +1,5 @@
-import { appendEvent, readEvents, type PatrolEvent } from '$lib/server/event-store';
+import type { PatrolEvent } from '$lib/events';
+import { appendEvent, readEvents } from '$lib/server/event-store';
 
 const SYSTEM_STREAM = 'system';
 

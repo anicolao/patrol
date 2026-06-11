@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import {
-  appendCameraCredentialsSaved,
-  currentCameraDiscoveryState
+  appendCameraCredentialsSaved
 } from '$lib/server/camera-events';
 import { appendCameraCredentials } from '$lib/server/secrets';
+import { currentCameraStateSnapshot } from '$lib/server/state-cache';
 
 export async function POST({ request }) {
   const body = await request.json();
@@ -29,7 +29,7 @@ export async function POST({ request }) {
     secretStoredAtMs: stored.storedAtMs
   });
 
-  return json(await currentCameraDiscoveryState());
+  return json(await currentCameraStateSnapshot({ forceRefresh: true }));
 }
 
 function stringField(value: unknown, field: string) {

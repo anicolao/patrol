@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
-import { currentCameraDiscoveryState } from '$lib/server/camera-events';
+import { currentCameraStateSnapshot } from '$lib/server/state-cache';
 
-export async function GET() {
-  return json(await currentCameraDiscoveryState());
+export async function GET({ url }) {
+  return json(await currentCameraStateSnapshot({ forceRefresh: url.searchParams.get('fresh') === '1' }));
 }

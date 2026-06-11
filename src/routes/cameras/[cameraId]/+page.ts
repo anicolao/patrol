@@ -1,5 +1,6 @@
 import { error } from '@sveltejs/kit';
 import type { CameraDiscoveryState } from '$lib/cameras/discovery';
+import type { CameraStateSnapshot } from '$lib/events';
 
 export const ssr = false;
 
@@ -9,7 +10,8 @@ export async function load({ params, fetch }) {
     error(response.status, `Camera state failed with HTTP ${response.status}.`);
   }
 
-  const state = (await response.json()) as CameraDiscoveryState;
+  const payload = await response.json();
+  const state = isCameraStateSnapshot(payload) ? payload.state : (payload as CameraDiscoveryState);
   const cameraId = decodeURIComponent(params.cameraId);
   const camera = state.devices.find((device) => device.id === cameraId);
 
@@ -24,4 +26,14 @@ export async function load({ params, fetch }) {
   return {
     camera
   };
+}
+
+function isCameraStateSnapshot(value: unknown): value is CameraStateSnapshot {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      'state' in value &&
+      'cachedAtMs' in value
+  );
 }
