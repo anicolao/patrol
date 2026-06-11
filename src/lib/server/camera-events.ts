@@ -8,6 +8,10 @@ import {
   type DiscoveryInitiatedPayload,
   type Go2rtcObservationRequestedPayload,
   type Go2rtcStreamsObservedPayload,
+  type PersonRecognitionSampleAnalyzedPayload,
+  type PersonRecognitionSampleDismissedPayload,
+  type PersonRecognitionSampleFailedPayload,
+  type PersonRecognitionSampleLabeledPayload,
   type RecordingSegmentExpiredPayload,
   type RecordingSegmentObservedPayload,
   reduceCameraDiscoveryEvents
@@ -101,6 +105,38 @@ export async function appendRecordingSegmentExpired(payload: RecordingSegmentExp
   return await appendEvent<RecordingSegmentExpiredPayload>(CAMERA_STREAM, {
     type: 'recording.segment.expired',
     source: 'patrol-recorder',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleAnalyzed(payload: PersonRecognitionSampleAnalyzedPayload) {
+  return await appendEvent<PersonRecognitionSampleAnalyzedPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.analyzed',
+    source: 'patrol-person-recognizer',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleFailed(payload: PersonRecognitionSampleFailedPayload) {
+  return await appendEvent<PersonRecognitionSampleFailedPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.failed',
+    source: 'patrol-person-recognizer',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleLabeled(payload: PersonRecognitionSampleLabeledPayload) {
+  return await appendEvent<PersonRecognitionSampleLabeledPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.labeled',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleDismissed(payload: PersonRecognitionSampleDismissedPayload) {
+  return await appendEvent<PersonRecognitionSampleDismissedPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.dismissed',
+    source: 'patrol-web',
     payload
   });
 }
