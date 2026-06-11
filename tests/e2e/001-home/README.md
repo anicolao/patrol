@@ -105,9 +105,20 @@
 
 ---
 
+## Unknown person samples can be labeled from high-resolution crops
+
+![Unknown person samples can be labeled from high-resolution crops](./screenshots/009-person-recognition.png)
+
+**Verifications:**
+- [x] People tab is selected
+- [x] Person recognition summary is shown
+- [x] Recognized sample can be bulk accepted or corrected
+
+---
+
 ## High-resolution live camera view is shown
 
-![High-resolution live camera view is shown](./screenshots/009-live-view.png)
+![High-resolution live camera view is shown](./screenshots/010-live-view.png)
 
 **Verifications:**
 - [x] Live camera route opens from the preview card
@@ -117,7 +128,7 @@
 
 ## Settings timestamp labels refresh without reload
 
-![Settings timestamp labels refresh without reload](./screenshots/010-refreshed-times.png)
+![Settings timestamp labels refresh without reload](./screenshots/011-refreshed-times.png)
 
 **Verifications:**
 - [x] Last discovery age advances after one minute
@@ -128,7 +139,7 @@
 
 ## Health timestamp labels refresh without reload
 
-![Health timestamp labels refresh without reload](./screenshots/011-health-refreshed-times.png)
+![Health timestamp labels refresh without reload](./screenshots/012-health-refreshed-times.png)
 
 **Verifications:**
 - [x] go2rtc observed age advances after one minute
