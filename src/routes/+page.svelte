@@ -21,20 +21,25 @@
     source: string | null;
     summary: string;
   };
-  type HistoryTimelineRow =
-    | {
-        type: 'event';
-        id: string;
-        timeMs: number;
-        event: ReviewableSecurityEvent;
-      }
-    | {
-        type: 'blank';
-        id: string;
-        timeMs: number;
-        startMs: number;
-        endMs: number;
-      };
+  type HistoryTimelineGroup = {
+    id: string;
+    startMs: number;
+    endMs: number;
+    timeMs: number;
+    events: ReviewableSecurityEvent[];
+  };
+  type HistoryTimelineTick = {
+    id: string;
+    timeMs: number;
+    label: string;
+  };
+  type HistoryTimeline = {
+    startMs: number;
+    endMs: number;
+    heightPx: number;
+    groups: HistoryTimelineGroup[];
+    ticks: HistoryTimelineTick[];
+  };
 
   const liveEventPort = '5186';
   const localStateCacheKey = 'patrol.camera_state.v4';
@@ -42,6 +47,10 @@
   const historyPersonScore = 0.85;
   const suggestedPersonScore = 0.3;
   const reviewablePersonCropVersion = 'motion-diff-v3';
+  const historyTimelinePixelsPerMinute = 18;
+  const historyTimelineBucketMs = 5 * 60 * 1000;
+  const historyTimelinePaddingPx = 168;
+  const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
 
   type PersonTriageGroup = {
     key: string;
@@ -75,7 +84,7 @@
   let selectedHistoryTimeMs: number | null = null;
   let selectedRecordingSource: string | null = null;
   let selectedRecordingQuality = 'no recording';
-  let historyTimelineRows: HistoryTimelineRow[] = [];
+  let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
   let historyTimelineElement: HTMLElement | null = null;
   let historyScrollFrame: number | null = null;
   let personSamples: PersonRecognitionSample[] = [];
@@ -100,7 +109,7 @@
   $: selectedReviewEvent = selectedReviewEventId
     ? ((discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ?? null)
     : null;
-  $: historyTimelineRows = buildHistoryTimelineRows(discoveryState?.recordings.events ?? []);
+  $: historyTimeline = buildHistoryTimeline(discoveryState?.recordings.events ?? []);
   $: selectedRecordingSource =
     selectedHistoryTimeMs !== null
       ? recordingSourceForTime(discoveryState?.recordings.segments ?? [], selectedHistoryTimeMs)
@@ -647,27 +656,31 @@
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
     selectedHistoryTimeMs = event.occurredAtMs;
-    void centerHistoryTimelineRow(`event-${event.id}`);
+    void centerHistoryTimelineTime(event.occurredAtMs);
   }
 
-  function selectTimelineBlank(row: Extract<HistoryTimelineRow, { type: 'blank' }>) {
+  function selectTimelineTime(timeMs: number) {
     selectedReviewEventId = null;
-    selectedHistoryTimeMs = row.timeMs;
-    void centerHistoryTimelineRow(row.id);
+    selectedHistoryTimeMs = timeMs;
+    void centerHistoryTimelineTime(timeMs);
   }
 
-  async function centerHistoryTimelineRow(rowId: string) {
+  function selectTimelineGroup(group: HistoryTimelineGroup) {
+    const event = group.events[0] ?? null;
+    if (event) {
+      selectedReviewEventId = event.id;
+      selectedHistoryTimeMs = event.occurredAtMs;
+      void centerHistoryTimelineTime(event.occurredAtMs);
+    }
+  }
+
+  async function centerHistoryTimelineTime(timeMs: number) {
     await tick();
     if (!historyTimelineElement) {
       return;
     }
 
-    const row = historyTimelineElement.querySelector<HTMLElement>(`[data-history-row-id="${CSS.escape(rowId)}"]`);
-    if (!row) {
-      return;
-    }
-
-    const targetTop = row.offsetTop + row.offsetHeight / 2 - historyTimelineElement.clientHeight / 2;
+    const targetTop = historyTimelinePaddingPx + historyTimelineYForTime(timeMs) - historyTimelineElement.clientHeight / 2;
     historyTimelineElement.scrollTo({
       top: Math.max(0, targetTop),
       behavior: 'smooth'
@@ -690,76 +703,181 @@
       return;
     }
 
-    const timelineRect = historyTimelineElement.getBoundingClientRect();
-    const playheadY = timelineRect.top + timelineRect.height / 2;
-    const rows = Array.from(historyTimelineElement.querySelectorAll<HTMLElement>('[data-history-time-ms]'));
-    let nearest: HTMLElement | null = null;
-    let nearestDistance = Number.POSITIVE_INFINITY;
-
-    for (const row of rows) {
-      const rect = row.getBoundingClientRect();
-      const distance = Math.abs(rect.top + rect.height / 2 - playheadY);
-      if (distance < nearestDistance) {
-        nearest = row;
-        nearestDistance = distance;
-      }
-    }
-
-    if (!nearest) {
-      return;
-    }
-
-    const timeMs = Number(nearest.dataset.historyTimeMs);
+    const playheadContentY = historyTimelineElement.scrollTop + historyTimelineElement.clientHeight / 2 - historyTimelinePaddingPx;
+    const timeMs = historyTimelineTimeForY(playheadContentY);
     if (Number.isFinite(timeMs) && selectedHistoryTimeMs !== timeMs) {
       selectedHistoryTimeMs = timeMs;
     }
 
-    selectedReviewEventId = nearest.dataset.historyEventId ?? null;
+    selectedReviewEventId = nearestHistoryGroupForTime(timeMs)?.events[0]?.id ?? null;
   }
 
-  function buildHistoryTimelineRows(events: ReviewableSecurityEvent[]): HistoryTimelineRow[] {
+  function handleHistoryTimelineClick(event: MouseEvent) {
+    if (!(event.currentTarget instanceof HTMLElement)) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const contentY = event.clientY - rect.top;
+    selectTimelineTime(historyTimelineTimeForY(contentY));
+  }
+
+  function emptyHistoryTimeline(): HistoryTimeline {
+    const now = Date.now();
+    return {
+      startMs: now - historyTimelineMinimumDurationMs,
+      endMs: now,
+      heightPx: historyTimelineHeight(historyTimelineMinimumDurationMs),
+      groups: [],
+      ticks: []
+    };
+  }
+
+  function buildHistoryTimeline(events: ReviewableSecurityEvent[]): HistoryTimeline {
     const sortedEvents = [...events].sort(
       (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
     );
-    const rows: HistoryTimelineRow[] = [];
-    const minimumVisibleGapMs = 2 * 60 * 1000;
 
-    sortedEvents.forEach((event, index) => {
-      rows.push({
-        type: 'event',
-        id: `event-${event.id}`,
-        timeMs: event.occurredAtMs,
-        event
-      });
-
-      const nextEvent = sortedEvents[index + 1];
-      if (!nextEvent) {
-        return;
-      }
-
-      const gapMs = event.occurredAtMs - nextEvent.occurredAtMs;
-      if (gapMs >= minimumVisibleGapMs) {
-        rows.push({
-          type: 'blank',
-          id: `blank-${event.id}-${nextEvent.id}`,
-          startMs: nextEvent.occurredAtMs,
-          endMs: event.occurredAtMs,
-          timeMs: nextEvent.occurredAtMs + Math.floor(gapMs / 2)
-        });
-      }
-    });
-
-    return rows;
-  }
-
-  function historyTimelineRowStyle(row: HistoryTimelineRow) {
-    if (row.type === 'event') {
-      return 'min-height: 112px;';
+    if (sortedEvents.length === 0) {
+      return emptyHistoryTimeline();
     }
 
-    const durationMinutes = Math.max(1, (row.endMs - row.startMs) / 60000);
-    const height = Math.min(220, Math.max(56, durationMinutes * 10));
-    return `min-height: ${height}px;`;
+    const latestMs = sortedEvents[0].occurredAtMs;
+    const earliestMs = sortedEvents.at(-1)?.occurredAtMs ?? latestMs;
+    const endMs = latestMs + 5 * 60 * 1000;
+    const startMs = Math.min(earliestMs - 5 * 60 * 1000, endMs - historyTimelineMinimumDurationMs);
+    const heightPx = historyTimelineHeight(endMs - startMs);
+    const groupsByBucket = new Map<number, ReviewableSecurityEvent[]>();
+
+    for (const event of sortedEvents) {
+      const bucket = Math.floor(event.occurredAtMs / historyTimelineBucketMs);
+      groupsByBucket.set(bucket, [...(groupsByBucket.get(bucket) ?? []), event]);
+    }
+
+    const groups = Array.from(groupsByBucket.entries())
+      .map(([bucket, groupEvents]) => {
+        const groupStartMs = Math.min(...groupEvents.map((event) => event.occurredAtMs));
+        const groupEndMs = Math.max(...groupEvents.map((event) => event.occurredAtMs));
+        return {
+          id: `group-${bucket}`,
+          startMs: groupStartMs,
+          endMs: groupEndMs,
+          timeMs: groupEndMs,
+          events: groupEvents.sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id))
+        };
+      })
+      .sort((left, right) => right.timeMs - left.timeMs || left.id.localeCompare(right.id));
+
+    return {
+      startMs,
+      endMs,
+      heightPx,
+      groups,
+      ticks: historyTimelineTicks(startMs, endMs)
+    };
+  }
+
+  function historyTimelineHeight(durationMs: number) {
+    return Math.max(360, Math.ceil((durationMs / 60000) * historyTimelinePixelsPerMinute));
+  }
+
+  function historyTimelineYForTime(timeMs: number) {
+    const clampedTimeMs = Math.min(historyTimeline.endMs, Math.max(historyTimeline.startMs, timeMs));
+    return ((historyTimeline.endMs - clampedTimeMs) / 60000) * historyTimelinePixelsPerMinute;
+  }
+
+  function historyTimelineTimeForY(y: number) {
+    const clampedY = Math.min(historyTimeline.heightPx, Math.max(0, y));
+    return Math.round(historyTimeline.endMs - (clampedY / historyTimelinePixelsPerMinute) * 60000);
+  }
+
+  function historyTimelineGroupStyle(group: HistoryTimelineGroup) {
+    const top = historyTimelineYForTime(group.timeMs);
+    const durationHeight = ((Math.max(historyTimelineBucketMs, group.endMs - group.startMs) / 60000) * historyTimelinePixelsPerMinute);
+    const height = Math.max(72, Math.min(132, durationHeight));
+    return `top: ${top}px; min-height: ${height}px;`;
+  }
+
+  function historyTimelineTickStyle(tick: HistoryTimelineTick) {
+    return `top: ${historyTimelineYForTime(tick.timeMs)}px;`;
+  }
+
+  function historyTimelineTicks(startMs: number, endMs: number): HistoryTimelineTick[] {
+    const durationMs = endMs - startMs;
+    const stepMs = durationMs > 24 * 60 * 60 * 1000 ? 24 * 60 * 60 * 1000 : durationMs > 3 * 60 * 60 * 1000 ? 60 * 60 * 1000 : 15 * 60 * 1000;
+    const firstTickMs = Math.ceil(startMs / stepMs) * stepMs;
+    const ticks: HistoryTimelineTick[] = [];
+
+    for (let timeMs = firstTickMs; timeMs <= endMs; timeMs += stepMs) {
+      ticks.push({
+        id: `tick-${timeMs}`,
+        timeMs,
+        label: stepMs >= 24 * 60 * 60 * 1000 ? formatDate(timeMs) : formatTimelineTime(timeMs)
+      });
+    }
+
+    return ticks;
+  }
+
+  function nearestHistoryGroupForTime(timeMs: number) {
+    const thresholdMs = historyTimelineBucketMs / 2;
+    let nearest: HistoryTimelineGroup | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const group of historyTimeline.groups) {
+      const distance = timeMs >= group.startMs && timeMs <= group.endMs ? 0 : Math.min(Math.abs(timeMs - group.startMs), Math.abs(timeMs - group.endMs));
+      if (distance < nearestDistance) {
+        nearest = group;
+        nearestDistance = distance;
+      }
+    }
+
+    return nearestDistance <= thresholdMs ? nearest : null;
+  }
+
+  function historyGroupLabel(group: HistoryTimelineGroup) {
+    const counts = new Map<string, number>();
+    for (const event of group.events) {
+      counts.set(event.label, (counts.get(event.label) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+      .join(', ');
+  }
+
+  function historyGroupNames(group: HistoryTimelineGroup) {
+    const names = new Set<string>();
+    for (const event of group.events) {
+      const label = historyPersonLabel(event);
+      if (label) {
+        names.add(label);
+      }
+    }
+
+    return Array.from(names).slice(0, 3).join(', ');
+  }
+
+  function historyGroupThumbnailUrl(group: HistoryTimelineGroup) {
+    for (const event of group.events) {
+      const thumbnailUrl = historyEventThumbnailUrl(event);
+      if (thumbnailUrl) {
+        return thumbnailUrl;
+      }
+    }
+
+    return null;
+  }
+
+  function historyGroupQualityLabel(group: HistoryTimelineGroup) {
+    if (group.events.some((event) => event.preferredSegment?.role === 'main')) {
+      return 'full quality';
+    }
+    if (group.events.some((event) => event.preferredSegment?.role === 'sub')) {
+      return 'substream';
+    }
+    return 'no recording';
   }
 
   function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
@@ -850,6 +968,13 @@
     return new Date(tsMs).toLocaleTimeString([], {
       hour: 'numeric',
       minute: '2-digit'
+    });
+  }
+
+  function formatDate(tsMs: number) {
+    return new Date(tsMs).toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric'
     });
   }
 
@@ -1460,59 +1585,54 @@
                   <span></span>
                 </div>
                 <div class="history-timeline-padding" aria-hidden="true"></div>
-                {#each historyTimelineRows as row}
-                  {#if row.type === 'event'}
-                    {@const eventPersonLabel = historyPersonLabel(row.event)}
-                    {@const thumbnailUrl = historyEventThumbnailUrl(row.event)}
+                <div
+                  class="history-timeline-content"
+                  style={`height: ${historyTimeline.heightPx}px;`}
+                  role="presentation"
+                  onclick={handleHistoryTimelineClick}
+                >
+                  {#each historyTimeline.ticks as tick}
+                    <div class="history-time-tick" style={historyTimelineTickStyle(tick)} aria-hidden="true">
+                      <span>{tick.label}</span>
+                    </div>
+                  {/each}
+                  {#each historyTimeline.groups as group}
+                    {@const groupThumbnailUrl = historyGroupThumbnailUrl(group)}
+                    {@const groupNames = historyGroupNames(group)}
                     <button
                       type="button"
-                      class="history-timeline-row history-event"
-                      class:active={row.event.id === selectedReviewEventId}
-                      style={historyTimelineRowStyle(row)}
-                      disabled={!row.event.preferredSegment}
+                      class="history-event-group"
+                      class:active={group.events.some((event) => event.id === selectedReviewEventId)}
+                      style={historyTimelineGroupStyle(group)}
                       data-testid="history-event-row"
-                      data-history-row-id={row.id}
-                      data-history-time-ms={row.timeMs}
-                      data-history-event-id={row.event.id}
-                      onclick={() => selectReviewEvent(row.event)}
+                      data-history-group-id={group.id}
+                      data-history-time-ms={group.timeMs}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        selectTimelineGroup(group);
+                      }}
                     >
-                      <span class="history-time-rail">{formatTimelineTime(row.timeMs)}</span>
                       <span class="history-event-thumb" aria-hidden="true">
-                        {#if thumbnailUrl}
-                          <img src={thumbnailUrl} alt="" />
+                        {#if groupThumbnailUrl}
+                          <img src={groupThumbnailUrl} alt="" />
                         {:else}
-                          {row.event.label.slice(0, 1)}
+                          {historyGroupLabel(group).slice(0, 1)}
                         {/if}
                       </span>
                       <span class="history-event-body">
-                        <strong>{row.event.label}</strong>
-                        {#if eventPersonLabel}
-                          <small class="history-person-label">{eventPersonLabel}</small>
+                        <strong>{historyGroupLabel(group)}</strong>
+                        {#if groupNames}
+                          <small class="history-person-label">{groupNames}</small>
                         {/if}
                         <small>
-                          {cameraById(row.event.cameraId)?.name ?? cameraById(row.event.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                          · {formatDateTime(row.event.occurredAtMs)}
+                          {cameraById(group.events[0].cameraId)?.name ?? cameraById(group.events[0].cameraId)?.remoteAddress ?? 'Unknown camera'}
+                          · {formatTimelineRange(group.startMs, group.endMs)}
                         </small>
                       </span>
-                      <span class="history-quality">{recordingQualityLabel(row.event)}</span>
+                      <span class="history-quality">{historyGroupQualityLabel(group)}</span>
                     </button>
-                  {:else}
-                    <button
-                      type="button"
-                      class="history-timeline-row history-blank"
-                      style={historyTimelineRowStyle(row)}
-                      data-history-row-id={row.id}
-                      data-history-time-ms={row.timeMs}
-                      onclick={() => selectTimelineBlank(row)}
-                    >
-                      <span class="history-time-rail">{formatTimelineTime(row.timeMs)}</span>
-                      <span class="history-blank-body">
-                        <strong>{formatTimelineRange(row.startMs, row.endMs)}</strong>
-                        <small>Quiet period. Tap to center this time under the playhead.</small>
-                      </span>
-                    </button>
-                  {/if}
-                {/each}
+                  {/each}
+                </div>
                 <div class="history-timeline-padding" aria-hidden="true"></div>
               </div>
             </section>
@@ -2209,7 +2329,6 @@
 
   .storage-summary span,
   .people-summary span,
-  .history-event small,
   .recording-player p {
     color: #66727f;
   }
@@ -2400,8 +2519,6 @@
 
   .history-timeline {
     position: relative;
-    display: grid;
-    gap: 8px;
     max-height: min(58vh, 640px);
     min-height: 360px;
     overflow-y: auto;
@@ -2415,6 +2532,22 @@
 
   .history-timeline-padding {
     height: 168px;
+  }
+
+  .history-timeline-content {
+    position: relative;
+    min-height: 360px;
+    cursor: crosshair;
+  }
+
+  .history-timeline-content::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 71px;
+    width: 1px;
+    background: #d9dde2;
+    content: '';
   }
 
   .history-playhead {
@@ -2445,35 +2578,46 @@
     content: '';
   }
 
-  .history-timeline-row {
+  .history-time-tick {
+    position: absolute;
+    right: 0;
+    left: 0;
+    border-top: 1px solid #edf0f3;
+    pointer-events: none;
+  }
+
+  .history-time-tick span {
+    position: absolute;
+    top: -0.62rem;
+    left: 0;
+    width: 62px;
+    color: #66727f;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-align: right;
+  }
+
+  .history-event-group {
+    position: absolute;
+    right: 10px;
+    left: 82px;
     display: grid;
-    grid-template-columns: 64px 52px minmax(0, 1fr) auto;
+    grid-template-columns: 52px minmax(0, 1fr);
     align-items: center;
     gap: 10px;
-    width: 100%;
     margin: 0;
-    border: 0;
-    border-radius: 0;
-    border-top: 1px solid #edf0f3;
-    background: transparent;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 4px 14px rgba(23, 26, 31, 0.08);
     color: #171a1f;
+    padding: 10px;
     text-align: left;
   }
 
-  .history-timeline-row.history-event {
-    padding: 12px;
-  }
-
-  .history-timeline-row.history-event.active {
+  .history-event-group.active {
     border-color: #bad3ea;
     background: #f2f7fc;
-  }
-
-  .history-time-rail {
-    color: #66727f;
-    font-size: 0.78rem;
-    font-weight: 800;
-    text-align: right;
   }
 
   .history-event-thumb {
@@ -2501,88 +2645,20 @@
     min-width: 0;
   }
 
-  .history-event-body small,
-  .history-blank-body small {
+  .history-event-body small {
     color: #66727f;
   }
 
   .history-quality {
+    grid-column: 2;
     color: #3d4752;
     font-size: 0.78rem;
     font-weight: 800;
-    white-space: nowrap;
-  }
-
-  .history-blank {
-    grid-template-columns: 64px minmax(0, 1fr);
-    padding: 10px 12px;
-    border-top-style: dashed;
-    color: #66727f;
-  }
-
-  .history-blank-body {
-    display: grid;
-    gap: 3px;
-  }
-
-  .history-event {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    width: 100%;
-    border-color: #d9dde2;
-    background: #ffffff;
-    color: #171a1f;
-    padding: 12px;
-    text-align: left;
-  }
-
-  .history-event:disabled {
-    cursor: default;
-  }
-
-  .history-event.active {
-    border-color: #1f4f82;
-    background: #f2f7fc;
-  }
-
-  .history-event > span:first-child {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .history-event > span:last-child {
-    color: #3d4752;
-    font-size: 0.82rem;
-    font-weight: 700;
-    white-space: nowrap;
   }
 
   .history-person-label {
     color: #1f4f82;
     font-weight: 800;
-  }
-
-  .history-timeline-row.history-event {
-    display: grid;
-    grid-template-columns: 64px 52px minmax(0, 1fr) auto;
-    justify-content: stretch;
-    border-color: #edf0f3;
-    background: transparent;
-    padding: 12px;
-  }
-
-  .history-timeline-row.history-event > span:first-child,
-  .history-timeline-row.history-event > span:last-child {
-    display: block;
-    min-width: 0;
-  }
-
-  .history-timeline-row.history-event.active {
-    border-color: #bad3ea;
-    background: #f2f7fc;
   }
 
   @media (orientation: landscape) and (min-width: 760px) {
