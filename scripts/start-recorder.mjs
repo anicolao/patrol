@@ -20,6 +20,7 @@ const mainRetentionMs = Number(process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS 
 const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ?? '30') * 24 * 60 * 60 * 1000;
 const segmentSettleMs = Number(process.env.PATROL_RECORDING_SEGMENT_SETTLE_MS ?? '5000');
 const minimumSegmentBytes = Number(process.env.PATROL_RECORDING_MIN_SEGMENT_BYTES ?? String(256 * 1024));
+const recordingRoles = parseRecordingRoles(process.env.PATROL_RECORDING_ROLES ?? 'main,sub');
 
 await mkdir(recordingsDir, { recursive: true, mode: 0o700 });
 
@@ -40,13 +41,12 @@ const heartbeat = startProcessHeartbeats({
   processId: 'patrol-recorder',
   label: 'Recording worker',
   kind: 'worker',
-  detail: `Recording ${cameras.length} configured camera${cameras.length === 1 ? '' : 's'}`
+  detail: `Recording ${recordingRoles.join('+')} for ${cameras.length} configured camera${cameras.length === 1 ? '' : 's'}`
 });
 
-const children = cameras.flatMap((camera) => [
-  startRecorder(camera, 'main', camera.streams.main),
-  startRecorder(camera, 'sub', camera.streams.sub)
-]);
+const children = cameras.flatMap((camera) =>
+  recordingRoles.map((role) => startRecorder(camera, role, camera.streams[role]))
+);
 
 await scanRecordings(cameras);
 const scanInterval = setInterval(() => {
@@ -146,7 +146,7 @@ function startRecorder(camera, role, streamName) {
 async function scanRecordings(cameras) {
   const nowMs = Date.now();
   for (const camera of cameras) {
-    for (const role of ['main', 'sub']) {
+    for (const role of recordingRoles) {
       const streamName = camera.streams[role];
       const streamDir = path.join(recordingsDir, streamName);
       let entries;
@@ -208,6 +208,15 @@ async function scanRecordings(cameras) {
       }
     }
   }
+}
+
+function parseRecordingRoles(value) {
+  const roles = value
+    .split(',')
+    .map((role) => role.trim())
+    .filter(Boolean);
+  const validRoles = roles.filter((role) => role === 'main' || role === 'sub');
+  return validRoles.length > 0 ? Array.from(new Set(validRoles)) : ['main', 'sub'];
 }
 
 async function expireSegment(input) {

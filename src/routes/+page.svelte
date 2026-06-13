@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { browser } from '$app/environment';
   import type {
     CameraDiscoveryState,
     DiscoveredCamera,
+    PersonRecognitionSample,
+    RecordingSegment,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
   import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
   import type { CameraStateSnapshot, EventCursor, PatrolEvent, StreamedPatrolEvent } from '$lib/events';
 
-  type Tab = 'cameras' | 'history' | 'settings' | 'health';
+  type Tab = 'cameras' | 'people' | 'history' | 'settings' | 'health';
   type LiveEventConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
   type LiveEventEntry = {
     receivedAtMs: number;
@@ -19,9 +21,44 @@
     source: string | null;
     summary: string;
   };
+  type HistoryTimelineGroup = {
+    id: string;
+    startMs: number;
+    endMs: number;
+    timeMs: number;
+    events: ReviewableSecurityEvent[];
+  };
+  type HistoryTimelineTick = {
+    id: string;
+    timeMs: number;
+    label: string;
+  };
+  type HistoryTimeline = {
+    startMs: number;
+    endMs: number;
+    heightPx: number;
+    groups: HistoryTimelineGroup[];
+    ticks: HistoryTimelineTick[];
+  };
 
   const liveEventPort = '5186';
-  const localStateCacheKey = 'patrol.camera_state.v2';
+  const localStateCacheKey = 'patrol.camera_state.v4';
+  const highConfidencePersonScore = 0.8;
+  const historyPersonScore = 0.85;
+  const suggestedPersonScore = 0.3;
+  const reviewablePersonCropVersion = 'motion-diff-v3';
+  const historyTimelinePixelsPerMinute = 18;
+  const historyTimelineBucketMs = 5 * 60 * 1000;
+  const historyTimelinePaddingPx = 168;
+  const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
+
+  type PersonTriageGroup = {
+    key: string;
+    label: string;
+    displayLabel: string;
+    samples: PersonRecognitionSample[];
+    references: PersonRecognitionSample[];
+  };
 
   let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
@@ -37,26 +74,80 @@
   let liveEventError: string | null = null;
   let liveEventUrl = '';
   let liveEvents: LiveEventEntry[] = [];
+  let personLabelStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
   let stateReloadInFlight = false;
   let stateReloadQueued = false;
   let configuredCameras: DiscoveredCamera[] = [];
   let processGreenCount = 0;
   let allProcessesGreen = false;
   let selectedReviewEvent: ReviewableSecurityEvent | null = null;
+  let selectedHistoryTimeMs: number | null = null;
   let selectedRecordingSource: string | null = null;
   let selectedRecordingQuality = 'no recording';
+  let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
+  let historyTimelineElement: HTMLElement | null = null;
+  let historyScrollFrame: number | null = null;
+  let personSamples: PersonRecognitionSample[] = [];
+  let reviewablePersonSamples: PersonRecognitionSample[] = [];
+  let highConfidencePersonGroups: PersonTriageGroup[] = [];
+  let suggestedPersonGroups: PersonTriageGroup[] = [];
+  let unlabelledPersonSamples: PersonRecognitionSample[] = [];
+  let visiblePersonLabels: string[] = [];
   $: discoveryState = cameraSnapshot?.state ?? null;
   $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
   $: allProcessesGreen =
     (discoveryState?.processes.length ?? 0) > 0 &&
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
-  $: selectedReviewEvent =
-    (discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ??
-    (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment) ??
-    null;
-  $: selectedRecordingSource = selectedReviewEvent ? recordingSource(selectedReviewEvent) : null;
-  $: selectedRecordingQuality = selectedReviewEvent ? recordingQualityLabel(selectedReviewEvent) : 'no recording';
+  $: if (selectedHistoryTimeMs === null) {
+    const defaultReviewEvent = (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment);
+    if (defaultReviewEvent) {
+      selectedReviewEventId = defaultReviewEvent.id;
+      selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+    }
+  }
+  $: selectedReviewEvent = selectedReviewEventId
+    ? ((discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ?? null)
+    : null;
+  $: historyTimeline = buildHistoryTimeline(discoveryState?.recordings.events ?? []);
+  $: selectedRecordingSource =
+    selectedHistoryTimeMs !== null
+      ? recordingSourceForTime(discoveryState?.recordings.segments ?? [], selectedHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingSource(selectedReviewEvent)
+        : null;
+  $: selectedRecordingQuality =
+    selectedHistoryTimeMs !== null
+      ? recordingQualityLabelForTime(discoveryState?.recordings.segments ?? [], selectedHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingQualityLabel(selectedReviewEvent)
+        : 'no recording';
+  $: personSamples = discoveryState?.people?.samples ?? [];
+  $: reviewablePersonSamples = personSamples.filter(
+    (sample) =>
+      sample.status === 'analyzed' &&
+      sample.cropUrl &&
+      sample.cropVersion === reviewablePersonCropVersion &&
+      !sample.label &&
+      !sample.dismissedAtMs
+  );
+  $: highConfidencePersonGroups = groupPersonSamples(
+    reviewablePersonSamples.filter(
+      (sample) => sample.suggestedLabel && (sample.suggestedScore ?? 0) >= highConfidencePersonScore
+    ),
+    personSamples
+  );
+  $: suggestedPersonGroups = groupPersonSamples(
+    reviewablePersonSamples.filter((sample) => {
+      const score = sample.suggestedScore ?? 0;
+      return sample.suggestedLabel && score >= suggestedPersonScore && score < highConfidencePersonScore;
+    }),
+    personSamples
+  );
+  $: unlabelledPersonSamples = reviewablePersonSamples.filter(
+    (sample) => !sample.suggestedLabel || (sample.suggestedScore ?? 0) < suggestedPersonScore
+  );
+  $: visiblePersonLabels = discoveryState?.people.labels.filter((label) => !isAnonymousPersonLabel(label)) ?? [];
 
   onMount(() => {
     hydrated = true;
@@ -367,7 +458,22 @@
       return false;
     }
     const candidate = value as Partial<CameraStateSnapshot>;
-    return Boolean(candidate.state) && typeof candidate.cachedAtMs === 'number' && isEventCursorOrNull(candidate.cursor);
+    return (
+      Boolean(candidate.state) &&
+      typeof candidate.cachedAtMs === 'number' &&
+      isEventCursorOrNull(candidate.cursor) &&
+      hasPersonRecognitionState(candidate.state)
+    );
+  }
+
+  function hasPersonRecognitionState(value: unknown) {
+    return Boolean(
+      value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        'people' in value &&
+        (value as Partial<CameraDiscoveryState>).people
+    );
   }
 
   function isEventCursorOrNull(value: unknown): value is EventCursor | null {
@@ -404,6 +510,11 @@
       return cameraId;
     }
 
+    const sampleId = typeof payload.sampleId === 'string' ? payload.sampleId : null;
+    if (sampleId) {
+      return sampleId;
+    }
+
     const processId = typeof payload.processId === 'string' ? payload.processId : null;
     if (processId) {
       return processId;
@@ -433,7 +544,7 @@
     const baseUrl = browser ? `${window.location.protocol}//${window.location.hostname}:1984` : 'http://127.0.0.1:1984';
     const params = new URLSearchParams({
       src: camera.streams[stream],
-      mode: 'webrtc,mse,hls',
+      mode: 'mse',
       width: '100%',
       background: 'false'
     });
@@ -544,6 +655,265 @@
 
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
+    selectedHistoryTimeMs = event.occurredAtMs;
+    void centerHistoryTimelineTime(event.occurredAtMs);
+  }
+
+  function selectTimelineTime(timeMs: number) {
+    selectedReviewEventId = null;
+    selectedHistoryTimeMs = timeMs;
+    void centerHistoryTimelineTime(timeMs);
+  }
+
+  function selectTimelineGroup(group: HistoryTimelineGroup) {
+    const event = group.events[0] ?? null;
+    if (event) {
+      selectedReviewEventId = event.id;
+      selectedHistoryTimeMs = event.occurredAtMs;
+      void centerHistoryTimelineTime(event.occurredAtMs);
+    }
+  }
+
+  async function centerHistoryTimelineTime(timeMs: number) {
+    await tick();
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const targetTop = historyTimelinePaddingPx + historyTimelineYForTime(timeMs) - historyTimelineElement.clientHeight / 2;
+    historyTimelineElement.scrollTo({
+      top: Math.max(0, targetTop),
+      behavior: 'smooth'
+    });
+  }
+
+  function handleHistoryTimelineScroll() {
+    if (historyScrollFrame !== null || !browser) {
+      return;
+    }
+
+    historyScrollFrame = window.requestAnimationFrame(() => {
+      historyScrollFrame = null;
+      updateHistoryPlayheadFromScroll();
+    });
+  }
+
+  function updateHistoryPlayheadFromScroll() {
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const playheadContentY = historyTimelineElement.scrollTop + historyTimelineElement.clientHeight / 2 - historyTimelinePaddingPx;
+    const timeMs = historyTimelineTimeForY(playheadContentY);
+    if (Number.isFinite(timeMs) && selectedHistoryTimeMs !== timeMs) {
+      selectedHistoryTimeMs = timeMs;
+    }
+
+    selectedReviewEventId = nearestHistoryGroupForTime(timeMs)?.events[0]?.id ?? null;
+  }
+
+  function handleHistoryTimelineClick(event: MouseEvent) {
+    if (!(event.currentTarget instanceof HTMLElement)) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const contentY = event.clientY - rect.top;
+    selectTimelineTime(historyTimelineTimeForY(contentY));
+  }
+
+  function emptyHistoryTimeline(): HistoryTimeline {
+    const now = Date.now();
+    return {
+      startMs: now - historyTimelineMinimumDurationMs,
+      endMs: now,
+      heightPx: historyTimelineHeight(historyTimelineMinimumDurationMs),
+      groups: [],
+      ticks: []
+    };
+  }
+
+  function buildHistoryTimeline(events: ReviewableSecurityEvent[]): HistoryTimeline {
+    const sortedEvents = [...events].sort(
+      (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
+    );
+
+    if (sortedEvents.length === 0) {
+      return emptyHistoryTimeline();
+    }
+
+    const latestMs = sortedEvents[0].occurredAtMs;
+    const earliestMs = sortedEvents.at(-1)?.occurredAtMs ?? latestMs;
+    const endMs = latestMs + 5 * 60 * 1000;
+    const startMs = Math.min(earliestMs - 5 * 60 * 1000, endMs - historyTimelineMinimumDurationMs);
+    const heightPx = historyTimelineHeight(endMs - startMs);
+    const groupsByBucket = new Map<number, ReviewableSecurityEvent[]>();
+
+    for (const event of sortedEvents) {
+      const bucket = Math.floor(event.occurredAtMs / historyTimelineBucketMs);
+      groupsByBucket.set(bucket, [...(groupsByBucket.get(bucket) ?? []), event]);
+    }
+
+    const groups = Array.from(groupsByBucket.entries())
+      .map(([bucket, groupEvents]) => {
+        const groupStartMs = Math.min(...groupEvents.map((event) => event.occurredAtMs));
+        const groupEndMs = Math.max(...groupEvents.map((event) => event.occurredAtMs));
+        return {
+          id: `group-${bucket}`,
+          startMs: groupStartMs,
+          endMs: groupEndMs,
+          timeMs: groupEndMs,
+          events: groupEvents.sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id))
+        };
+      })
+      .sort((left, right) => right.timeMs - left.timeMs || left.id.localeCompare(right.id));
+
+    return {
+      startMs,
+      endMs,
+      heightPx,
+      groups,
+      ticks: historyTimelineTicks(startMs, endMs)
+    };
+  }
+
+  function historyTimelineHeight(durationMs: number) {
+    return Math.max(360, Math.ceil((durationMs / 60000) * historyTimelinePixelsPerMinute));
+  }
+
+  function historyTimelineYForTime(timeMs: number) {
+    const clampedTimeMs = Math.min(historyTimeline.endMs, Math.max(historyTimeline.startMs, timeMs));
+    return ((historyTimeline.endMs - clampedTimeMs) / 60000) * historyTimelinePixelsPerMinute;
+  }
+
+  function historyTimelineTimeForY(y: number) {
+    const clampedY = Math.min(historyTimeline.heightPx, Math.max(0, y));
+    return Math.round(historyTimeline.endMs - (clampedY / historyTimelinePixelsPerMinute) * 60000);
+  }
+
+  function historyTimelineGroupStyle(group: HistoryTimelineGroup) {
+    const top = historyTimelineYForTime(group.timeMs);
+    const durationHeight = ((Math.max(historyTimelineBucketMs, group.endMs - group.startMs) / 60000) * historyTimelinePixelsPerMinute);
+    const height = Math.max(72, Math.min(132, durationHeight));
+    return `top: ${top}px; min-height: ${height}px;`;
+  }
+
+  function historyTimelineTickStyle(tick: HistoryTimelineTick) {
+    return `top: ${historyTimelineYForTime(tick.timeMs)}px;`;
+  }
+
+  function historyTimelineTicks(startMs: number, endMs: number): HistoryTimelineTick[] {
+    const durationMs = endMs - startMs;
+    const stepMs = durationMs > 24 * 60 * 60 * 1000 ? 24 * 60 * 60 * 1000 : durationMs > 3 * 60 * 60 * 1000 ? 60 * 60 * 1000 : 15 * 60 * 1000;
+    const firstTickMs = Math.ceil(startMs / stepMs) * stepMs;
+    const ticks: HistoryTimelineTick[] = [];
+
+    for (let timeMs = firstTickMs; timeMs <= endMs; timeMs += stepMs) {
+      ticks.push({
+        id: `tick-${timeMs}`,
+        timeMs,
+        label: stepMs >= 24 * 60 * 60 * 1000 ? formatDate(timeMs) : formatTimelineTime(timeMs)
+      });
+    }
+
+    return ticks;
+  }
+
+  function nearestHistoryGroupForTime(timeMs: number) {
+    const thresholdMs = historyTimelineBucketMs / 2;
+    let nearest: HistoryTimelineGroup | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const group of historyTimeline.groups) {
+      const distance = timeMs >= group.startMs && timeMs <= group.endMs ? 0 : Math.min(Math.abs(timeMs - group.startMs), Math.abs(timeMs - group.endMs));
+      if (distance < nearestDistance) {
+        nearest = group;
+        nearestDistance = distance;
+      }
+    }
+
+    return nearestDistance <= thresholdMs ? nearest : null;
+  }
+
+  function historyGroupLabel(group: HistoryTimelineGroup) {
+    const counts = new Map<string, number>();
+    for (const event of group.events) {
+      counts.set(event.label, (counts.get(event.label) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+      .join(', ');
+  }
+
+  function historyGroupNames(group: HistoryTimelineGroup) {
+    const names = new Set<string>();
+    for (const event of group.events) {
+      const label = historyPersonLabel(event);
+      if (label) {
+        names.add(label);
+      }
+    }
+
+    return Array.from(names).slice(0, 3).join(', ');
+  }
+
+  function historyGroupThumbnailUrl(group: HistoryTimelineGroup) {
+    for (const event of group.events) {
+      const thumbnailUrl = historyEventThumbnailUrl(event);
+      if (thumbnailUrl) {
+        return thumbnailUrl;
+      }
+    }
+
+    return null;
+  }
+
+  function historyGroupQualityLabel(group: HistoryTimelineGroup) {
+    if (group.events.some((event) => event.preferredSegment?.role === 'main')) {
+      return 'full quality';
+    }
+    if (group.events.some((event) => event.preferredSegment?.role === 'sub')) {
+      return 'substream';
+    }
+    return 'no recording';
+  }
+
+  function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
+    const cameraId = selectedReviewEvent?.cameraId ?? configuredCameras[0]?.id ?? null;
+    const candidates = segments.filter(
+      (segment) =>
+        (!cameraId || segment.cameraId === cameraId) &&
+        timeMs >= segment.startMs &&
+        timeMs <= segment.endMs
+    );
+
+    return (
+      candidates.find((segment) => segment.role === 'main') ??
+      candidates.find((segment) => segment.role === 'sub') ??
+      null
+    );
+  }
+
+  function recordingSourceForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return null;
+    }
+
+    const params = new URLSearchParams({ path: segment.relativePath });
+    const offsetSeconds = Math.max(0, Math.floor((timeMs - segment.startMs) / 1000));
+    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
+  }
+
+  function recordingQualityLabelForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return 'no recording';
+    }
+
+    return segment.role === 'main' ? 'full quality' : 'substream';
   }
 
   function recordingSource(event: ReviewableSecurityEvent) {
@@ -563,6 +933,53 @@
     }
 
     return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
+  }
+
+  function historyPersonLabel(event: ReviewableSecurityEvent) {
+    const samples = personSamples.filter((sample) => sample.sourceEventId === event.sourceEventId);
+    const labeledSample = samples.find((sample) => sample.label && !isAnonymousPersonLabel(sample.label));
+    if (labeledSample?.label) {
+      return labeledSample.label;
+    }
+
+    const suggestedSample = samples
+      .filter(
+        (sample) =>
+          sample.suggestedLabel &&
+          !isAnonymousPersonLabel(sample.suggestedLabel) &&
+          (sample.suggestedScore ?? 0) >= historyPersonScore
+      )
+      .sort((left, right) => (right.suggestedScore ?? 0) - (left.suggestedScore ?? 0))[0];
+
+    if (!suggestedSample?.suggestedLabel || suggestedSample.suggestedScore === null) {
+      return null;
+    }
+
+    return `${personLabelDisplay(suggestedSample.suggestedLabel)} ${Math.round(suggestedSample.suggestedScore * 100)}%`;
+  }
+
+  function historyEventThumbnailUrl(event: ReviewableSecurityEvent) {
+    return (
+      personSamples.find((sample) => sample.sourceEventId === event.sourceEventId && sample.cropUrl)?.cropUrl ?? null
+    );
+  }
+
+  function formatTimelineTime(tsMs: number) {
+    return new Date(tsMs).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function formatDate(tsMs: number) {
+    return new Date(tsMs).toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric'
+    });
+  }
+
+  function formatTimelineRange(startMs: number, endMs: number) {
+    return `${formatTimelineTime(startMs)} - ${formatTimelineTime(endMs)}`;
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -613,6 +1030,157 @@
       };
     }
   }
+
+  async function labelPersonSample(sample: PersonRecognitionSample, event: SubmitEvent) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+
+    const formData = new FormData(form);
+    const label = String(formData.get('label') ?? '').trim();
+    if (!label) {
+      return;
+    }
+
+    await labelPersonSamples([sample], label);
+  }
+
+  async function labelPersonSamples(samples: PersonRecognitionSample[], label: string) {
+    const sampleIds = samples.map((sample) => sample.id);
+    if (sampleIds.length === 0 || !label.trim()) {
+      return;
+    }
+
+    personLabelStatus = {
+      ...personLabelStatus,
+      ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saving' as const, message: 'Saving label...' }]))
+    };
+
+    try {
+      const response = await fetch('/api/person-recognition/labels', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sampleIds,
+          label: label.trim()
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Label save failed with HTTP ${response.status}`);
+      }
+      setCameraSnapshotFromPayload(await response.json());
+      personLabelStatus = {
+        ...personLabelStatus,
+        ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saved' as const, message: `Labeled ${label.trim()}.` }]))
+      };
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      personLabelStatus = {
+        ...personLabelStatus,
+        ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'error' as const, message }]))
+      };
+    }
+  }
+
+  async function dismissPersonSample(sample: PersonRecognitionSample) {
+    personLabelStatus = {
+      ...personLabelStatus,
+      [sample.id]: { state: 'saving', message: 'Dismissing...' }
+    };
+
+    try {
+      const response = await fetch('/api/person-recognition/dismiss', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sampleId: sample.id })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Dismiss failed with HTTP ${response.status}`);
+      }
+      setCameraSnapshotFromPayload(await response.json());
+      personLabelStatus = {
+        ...personLabelStatus,
+        [sample.id]: { state: 'saved', message: 'Assigned anonymous identity.' }
+      };
+    } catch (caught) {
+      personLabelStatus = {
+        ...personLabelStatus,
+        [sample.id]: {
+          state: 'error',
+          message: caught instanceof Error ? caught.message : String(caught)
+        }
+      };
+    }
+  }
+
+  function groupPersonSamples(samples: PersonRecognitionSample[], allSamples: PersonRecognitionSample[]): PersonTriageGroup[] {
+    const grouped = new Map<string, PersonRecognitionSample[]>();
+    for (const sample of samples) {
+      if (!sample.suggestedLabel) {
+        continue;
+      }
+      grouped.set(sample.suggestedLabel, [...(grouped.get(sample.suggestedLabel) ?? []), sample]);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([label, groupedSamples]) => ({
+        key: label,
+        label,
+        displayLabel: personLabelDisplay(label),
+        samples: groupedSamples.sort(
+          (left, right) => (right.suggestedScore ?? 0) - (left.suggestedScore ?? 0) || right.occurredAtMs - left.occurredAtMs
+        ),
+        references: personReferenceSamples(label, allSamples)
+      }))
+      .sort((left, right) => right.samples.length - left.samples.length || left.label.localeCompare(right.label));
+  }
+
+  function personReferenceSamples(label: string, allSamples: PersonRecognitionSample[]) {
+    return allSamples
+      .filter((sample) => sample.label === label && sample.status === 'analyzed' && sample.cropUrl)
+      .sort((left, right) => (right.labeledAtMs ?? 0) - (left.labeledAtMs ?? 0) || right.occurredAtMs - left.occurredAtMs)
+      .slice(0, 8);
+  }
+
+  function isAnonymousPersonLabel(label: string | null | undefined) {
+    return Boolean(label?.startsWith('anonymous:'));
+  }
+
+  function personLabelDisplay(label: string | null | undefined) {
+    if (!label) {
+      return 'Unknown person';
+    }
+    if (!isAnonymousPersonLabel(label)) {
+      return label;
+    }
+
+    return `GUID ${label.replace(/^anonymous:/, '').slice(0, 8)}`;
+  }
+
+  function personCorrectionValue(sample: PersonRecognitionSample) {
+    return isAnonymousPersonLabel(sample.suggestedLabel) ? '' : sample.suggestedLabel ?? '';
+  }
+
+  function personSuggestion(sample: PersonRecognitionSample) {
+    if (!sample.suggestedLabel || sample.suggestedScore === null) {
+      return null;
+    }
+
+    return `${personLabelDisplay(sample.suggestedLabel)} (${Math.round(sample.suggestedScore * 100)}%)`;
+  }
+
+  function scalePersonCropThumbnail(event: Event) {
+    const image = event.currentTarget;
+    if (!(image instanceof HTMLImageElement) || image.naturalWidth <= 0) {
+      return;
+    }
+
+    image.style.width = `${Math.max(1, Math.round(image.naturalWidth / 2))}px`;
+  }
 </script>
 
 <svelte:head>
@@ -626,6 +1194,8 @@
       <h1>
         {activeTab === 'cameras'
           ? 'Cameras'
+          : activeTab === 'people'
+            ? 'People'
           : activeTab === 'history'
             ? 'History'
             : activeTab === 'settings'
@@ -679,6 +1249,246 @@
         </section>
       {/if}
     </section>
+  {:else if activeTab === 'people'}
+    <section class="view" aria-labelledby="people-title">
+      <div class="section-header">
+        <div>
+          <h2 id="people-title">Person Recognition</h2>
+          <p>Review high-resolution crops captured from camera-side person events and label unknown people.</p>
+          <p class="event-path">Labels and samples append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
+        </div>
+      </div>
+
+      {#if discoveryState?.people}
+        <div class="people-summary" data-testid="people-summary">
+          <div>
+            <span>Unknown</span>
+            <strong>{reviewablePersonSamples.length}</strong>
+          </div>
+          <div>
+            <span>Labeled</span>
+            <strong>{discoveryState.people.labeledCount}</strong>
+          </div>
+          <div>
+            <span>Known names</span>
+            <strong>{visiblePersonLabels.length}</strong>
+          </div>
+        </div>
+
+        {#if reviewablePersonSamples.length > 0}
+          <div class="person-triage" aria-label="Person recognition triage">
+            {#each highConfidencePersonGroups as group}
+              <section class="person-group" aria-label={`High confidence ${group.displayLabel} samples`}>
+                <div class="person-group-header">
+                  <div>
+                    <h3>Recognized as {group.displayLabel}</h3>
+                    <p>{group.samples.length} sample{group.samples.length === 1 ? '' : 's'} above 80% confidence.</p>
+                  </div>
+                  <button type="button" class="secondary" onclick={() => labelPersonSamples(group.samples, group.label)}>
+                    Accept all
+                  </button>
+                </div>
+                {#if group.references.length > 0}
+                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+                    {#each group.references as reference}
+                      <img
+                        src={reference.cropUrl}
+                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+                        onload={scalePersonCropThumbnail}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+                <ol class="person-grid" aria-label={`Recognized as ${group.displayLabel}`}>
+                  {#each group.samples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img
+                        src={sample.cropUrl}
+                        alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`}
+                        onload={scalePersonCropThumbnail}
+                      />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>{group.displayLabel}</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p class="suggestion">Suggested {personSuggestion(sample)}</p>
+                        </div>
+                        <div class="person-card-actions">
+                          <button type="button" class="secondary" onclick={() => labelPersonSamples([sample], group.label)}>
+                            Accept
+                          </button>
+                          <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Correct label</span>
+                            <input
+                              name="label"
+                              list="known-person-labels"
+                              value={personCorrectionValue(sample)}
+                              autocomplete="off"
+                              required
+                            />
+                          </label>
+                          <button type="submit" class="secondary">Save correction</button>
+                        </form>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/each}
+
+            {#each suggestedPersonGroups as group}
+              <section class="person-group" aria-label={`Suggested ${group.displayLabel} samples`}>
+                <div class="person-group-header">
+                  <div>
+                    <h3>Suggested {group.displayLabel}</h3>
+                    <p>{group.samples.length} sample{group.samples.length === 1 ? '' : 's'} between 30% and 80% confidence.</p>
+                  </div>
+                  <button type="button" class="secondary" onclick={() => labelPersonSamples(group.samples, group.label)}>
+                    Label all {group.displayLabel}
+                  </button>
+                </div>
+                {#if group.references.length > 0}
+                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+                    {#each group.references as reference}
+                      <img
+                        src={reference.cropUrl}
+                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+                        onload={scalePersonCropThumbnail}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+                <ol class="person-grid" aria-label={`Suggested ${group.displayLabel}`}>
+                  {#each group.samples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img
+                        src={sample.cropUrl}
+                        alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`}
+                        onload={scalePersonCropThumbnail}
+                      />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>{group.displayLabel}</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p class="suggestion">Suggested {personSuggestion(sample)}</p>
+                        </div>
+                        <div class="person-card-actions">
+                          <button type="button" class="secondary" onclick={() => labelPersonSamples([sample], group.label)}>
+                            Accept
+                          </button>
+                          <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Correct label</span>
+                            <input
+                              name="label"
+                              list="known-person-labels"
+                              value={personCorrectionValue(sample)}
+                              autocomplete="off"
+                              required
+                            />
+                          </label>
+                          <button type="submit" class="secondary">Save correction</button>
+                        </form>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/each}
+
+            {#if unlabelledPersonSamples.length > 0}
+              <section class="person-group" aria-label="Unlabelled person samples">
+                <div class="person-group-header">
+                  <div>
+                    <h3>Unlabelled</h3>
+                    <p>{unlabelledPersonSamples.length} sample{unlabelledPersonSamples.length === 1 ? '' : 's'} with no useful match yet.</p>
+                  </div>
+                </div>
+                <ol class="person-grid" aria-label="Unlabelled person samples">
+                  {#each unlabelledPersonSamples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img
+                        src={sample.cropUrl}
+                        alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`}
+                        onload={scalePersonCropThumbnail}
+                      />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>Unknown person</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p>Start labeling here; similar samples will move into suggested groups.</p>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Label this person</span>
+                            <input name="label" list="known-person-labels" autocomplete="off" required />
+                          </label>
+                          <button type="submit" class="secondary">Save label</button>
+                        </form>
+                        <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/if}
+          </div>
+          <datalist id="known-person-labels">
+            {#each visiblePersonLabels as label}
+              <option value={label}></option>
+            {/each}
+          </datalist>
+        {:else}
+          <p class="notice">No current person crops are ready for review. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
+        {/if}
+      {:else}
+        <p class="notice">Person recognition state has not been replayed yet.</p>
+      {/if}
+    </section>
   {:else if activeTab === 'history'}
     <section class="view" aria-labelledby="history-title">
       <div class="section-header">
@@ -709,17 +1519,31 @@
           </div>
         </div>
 
-        {#if selectedReviewEvent}
-          {@const selectedEvent = selectedReviewEvent}
+        {#if discoveryState.recordings.events.length > 0}
+          <div class="history-workspace">
             <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
               <div class="recording-player-header">
                 <div>
-                  <h3>{selectedEvent.label}</h3>
-                  <p>
-                    {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                    · {formatDateTime(selectedEvent.occurredAtMs)}
-                    · {selectedRecordingQuality}
-                  </p>
+                  {#if selectedReviewEvent}
+                    {@const selectedEvent = selectedReviewEvent}
+                    {@const selectedPersonLabel = historyPersonLabel(selectedEvent)}
+                    <h3>{selectedEvent.label}</h3>
+                    {#if selectedPersonLabel}
+                      <p class="history-person-label">{selectedPersonLabel}</p>
+                    {/if}
+                    <p>
+                      {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedEvent.occurredAtMs)}
+                      · {selectedRecordingQuality}
+                    </p>
+                  {:else if selectedHistoryTimeMs !== null}
+                    <h3>Timeline position</h3>
+                    <p>
+                      {configuredCameras[0]?.name ?? configuredCameras[0]?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedHistoryTimeMs)}
+                      · {selectedRecordingQuality}
+                    </p>
+                  {/if}
                 </div>
               </div>
               {#if selectedRecordingSource}
@@ -735,35 +1559,84 @@
                 {/key}
               {:else}
                 <p class="notice compact">
-                  No retained recording segment currently overlaps this event.
+                  No retained recording segment currently overlaps the playhead.
                 </p>
               {/if}
             </section>
-        {/if}
 
-        {#if discoveryState.recordings.events.length > 0}
-          <ol class="history-list" aria-label="Observed security events">
-            {#each discoveryState.recordings.events as event}
-              <li data-testid="history-event-row">
-                <button
-                  type="button"
-                  class="history-event"
-                  class:active={event.id === selectedReviewEventId}
-                  disabled={!event.preferredSegment}
-                  onclick={() => selectReviewEvent(event)}
+            <section class="history-timeline-panel" aria-label="Video history timeline">
+              <div class="history-timeline-header">
+                <div>
+                  <h3>Timeline</h3>
+                  <p>Scroll the timeline under the fixed playhead to scrub video.</p>
+                </div>
+                {#if selectedHistoryTimeMs !== null}
+                  <strong>{formatDateTime(selectedHistoryTimeMs)}</strong>
+                {/if}
+              </div>
+
+              <div
+                class="history-timeline"
+                bind:this={historyTimelineElement}
+                onscroll={handleHistoryTimelineScroll}
+                data-testid="history-timeline"
+              >
+                <div class="history-playhead" aria-hidden="true">
+                  <span></span>
+                </div>
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+                <div
+                  class="history-timeline-content"
+                  style={`height: ${historyTimeline.heightPx}px;`}
+                  role="presentation"
+                  onclick={handleHistoryTimelineClick}
                 >
-                  <span>
-                    <strong>{event.label}</strong>
-                    <small>
-                      {cameraById(event.cameraId)?.name ?? cameraById(event.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                      · {formatDateTime(event.occurredAtMs)}
-                    </small>
-                  </span>
-                  <span>{recordingQualityLabel(event)}</span>
-                </button>
-              </li>
-            {/each}
-          </ol>
+                  {#each historyTimeline.ticks as tick}
+                    <div class="history-time-tick" style={historyTimelineTickStyle(tick)} aria-hidden="true">
+                      <span>{tick.label}</span>
+                    </div>
+                  {/each}
+                  {#each historyTimeline.groups as group}
+                    {@const groupThumbnailUrl = historyGroupThumbnailUrl(group)}
+                    {@const groupNames = historyGroupNames(group)}
+                    <button
+                      type="button"
+                      class="history-event-group"
+                      class:active={group.events.some((event) => event.id === selectedReviewEventId)}
+                      style={historyTimelineGroupStyle(group)}
+                      data-testid="history-event-row"
+                      data-history-group-id={group.id}
+                      data-history-time-ms={group.timeMs}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        selectTimelineGroup(group);
+                      }}
+                    >
+                      <span class="history-event-thumb" aria-hidden="true">
+                        {#if groupThumbnailUrl}
+                          <img src={groupThumbnailUrl} alt="" />
+                        {:else}
+                          {historyGroupLabel(group).slice(0, 1)}
+                        {/if}
+                      </span>
+                      <span class="history-event-body">
+                        <strong>{historyGroupLabel(group)}</strong>
+                        {#if groupNames}
+                          <small class="history-person-label">{groupNames}</small>
+                        {/if}
+                        <small>
+                          {cameraById(group.events[0].cameraId)?.name ?? cameraById(group.events[0].cameraId)?.remoteAddress ?? 'Unknown camera'}
+                          · {formatTimelineRange(group.startMs, group.endMs)}
+                        </small>
+                      </span>
+                      <span class="history-quality">{historyGroupQualityLabel(group)}</span>
+                    </button>
+                  {/each}
+                </div>
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+              </div>
+            </section>
+          </div>
         {:else}
           <p class="notice">No vehicle, person, or motion events have been observed yet.</p>
         {/if}
@@ -1106,6 +1979,21 @@
   </button>
   <button
     type="button"
+    class:active={activeTab === 'people'}
+    aria-label="People"
+    aria-current={activeTab === 'people' ? 'page' : undefined}
+    data-testid="tab-people"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'people')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="8" r="4"></circle>
+      <path d="M5 21a7 7 0 0 1 14 0"></path>
+    </svg>
+    <span>People</span>
+  </button>
+  <button
+    type="button"
     class:active={activeTab === 'history'}
     aria-label="History"
     aria-current={activeTab === 'history' ? 'page' : undefined}
@@ -1366,8 +2254,7 @@
 
   .camera-grid,
   .settings-list,
-  .health-list,
-  .history-list {
+  .health-list {
     display: grid;
     gap: 12px;
     margin: 0;
@@ -1423,7 +2310,15 @@
     margin-bottom: 12px;
   }
 
-  .storage-summary div {
+  .people-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .storage-summary div,
+  .people-summary div {
     display: grid;
     gap: 4px;
     border: 1px solid #d9dde2;
@@ -1433,19 +2328,134 @@
   }
 
   .storage-summary span,
-  .history-event small,
+  .people-summary span,
   .recording-player p {
     color: #66727f;
   }
 
-  .storage-summary span {
+  .storage-summary span,
+  .people-summary span {
     font-size: 0.78rem;
     font-weight: 700;
     text-transform: uppercase;
   }
 
-  .storage-summary strong {
+  .storage-summary strong,
+  .people-summary strong {
     font-size: 1rem;
+  }
+
+  .person-grid {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .person-triage,
+  .person-group {
+    display: grid;
+    gap: 12px;
+  }
+
+  .person-group {
+    padding: 12px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+  }
+
+  .person-group-header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .person-group-header h3 {
+    margin-bottom: 2px;
+    font-size: 1rem;
+  }
+
+  .person-group-header p {
+    margin-bottom: 0;
+    color: #66727f;
+  }
+
+  .person-reference-strip {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 8px;
+    border: 1px solid #e6e9ed;
+    border-radius: 8px;
+    background: #f8fafb;
+  }
+
+  .person-reference-strip img {
+    display: block;
+    width: auto;
+    max-width: 72px;
+    max-height: 96px;
+    height: auto;
+    flex: 0 0 auto;
+  }
+
+  .person-card {
+    display: grid;
+    overflow: hidden;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+  }
+
+  .person-card img {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+  }
+
+  .person-card-body {
+    display: grid;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .person-card-body h4 {
+    margin-bottom: 2px;
+    font-size: 1rem;
+  }
+
+  .person-card-body p {
+    margin-bottom: 0;
+    color: #66727f;
+  }
+
+  .person-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .person-card-body .success {
+    color: #17683a;
+  }
+
+  .person-card-body .error {
+    color: #9f1d1d;
+  }
+
+  .suggestion {
+    color: #1f4f82;
+    font-weight: 700;
+  }
+
+  .person-label-form {
+    display: grid;
+    gap: 10px;
   }
 
   .recording-player {
@@ -1474,43 +2484,198 @@
     background: #111827;
   }
 
-  .history-list li {
-    margin: 0;
+  .history-workspace {
+    display: grid;
+    gap: 12px;
   }
 
-  .history-event {
+  .history-timeline-panel {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .history-timeline-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
-    width: 100%;
-    border-color: #d9dde2;
-    background: #ffffff;
+  }
+
+  .history-timeline-header h3,
+  .history-timeline-header p {
+    margin-bottom: 0;
+  }
+
+  .history-timeline-header p {
+    color: #66727f;
+  }
+
+  .history-timeline-header strong {
+    color: #1f4f82;
+    font-size: 0.86rem;
+    white-space: nowrap;
+  }
+
+  .history-timeline {
+    position: relative;
+    max-height: min(58vh, 640px);
+    min-height: 360px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background:
+      linear-gradient(90deg, #f6f8fa 0 72px, transparent 72px),
+      #ffffff;
+  }
+
+  .history-timeline-padding {
+    height: 168px;
+  }
+
+  .history-timeline-content {
+    position: relative;
+    min-height: 360px;
+    cursor: crosshair;
+  }
+
+  .history-timeline-content::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 71px;
+    width: 1px;
+    background: #d9dde2;
+    content: '';
+  }
+
+  .history-playhead {
+    position: sticky;
+    top: 50%;
+    z-index: 5;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .history-playhead span {
+    position: absolute;
+    right: 0;
+    left: 0;
+    display: block;
+    border-top: 2px solid #c82232;
+    box-shadow: 0 0 0 1px rgba(200, 34, 50, 0.12);
+  }
+
+  .history-playhead span::before {
+    position: absolute;
+    top: -7px;
+    left: 58px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: #c82232;
+    content: '';
+  }
+
+  .history-time-tick {
+    position: absolute;
+    right: 0;
+    left: 0;
+    border-top: 1px solid #edf0f3;
+    pointer-events: none;
+  }
+
+  .history-time-tick span {
+    position: absolute;
+    top: -0.62rem;
+    left: 0;
+    width: 62px;
+    color: #66727f;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-align: right;
+  }
+
+  .history-event-group {
+    position: absolute;
+    right: 10px;
+    left: 82px;
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 4px 14px rgba(23, 26, 31, 0.08);
     color: #171a1f;
-    padding: 12px;
+    padding: 10px;
     text-align: left;
   }
 
-  .history-event:disabled {
-    cursor: default;
-  }
-
-  .history-event.active {
-    border-color: #1f4f82;
+  .history-event-group.active {
+    border-color: #bad3ea;
     background: #f2f7fc;
   }
 
-  .history-event > span:first-child {
+  .history-event-thumb {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    overflow: hidden;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    background: #eef2f5;
+    color: #1f4f82;
+    font-weight: 900;
+  }
+
+  .history-event-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .history-event-body {
     display: grid;
     gap: 3px;
     min-width: 0;
   }
 
-  .history-event > span:last-child {
+  .history-event-body small {
+    color: #66727f;
+  }
+
+  .history-quality {
+    grid-column: 2;
     color: #3d4752;
-    font-size: 0.82rem;
-    font-weight: 700;
-    white-space: nowrap;
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
+  .history-person-label {
+    color: #1f4f82;
+    font-weight: 800;
+  }
+
+  @media (orientation: landscape) and (min-width: 760px) {
+    .history-workspace {
+      grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+      align-items: start;
+    }
+
+    .recording-player {
+      position: sticky;
+      top: 16px;
+      margin-bottom: 0;
+    }
+
+    .history-timeline {
+      max-height: min(72vh, 760px);
+    }
   }
 
   .empty-state {
@@ -1829,7 +2994,7 @@
     left: 0;
     z-index: 10;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 4px;
     border-top: 1px solid #d5d8dc;
     background: rgb(255 255 255 / 0.96);
@@ -1883,6 +3048,10 @@
 
     .camera-grid {
       grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    }
+
+    .person-grid {
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     }
 
     .section-header {
