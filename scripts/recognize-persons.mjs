@@ -16,6 +16,7 @@ const cropsDir = path.join(recognizerDir, 'crops');
 const framesDir = path.join(recognizerDir, 'frames');
 const binDir = path.join(dataRoot, 'bin');
 const helperPath = path.join(binDir, 'patrol-person-featureprint');
+const go2rtcRtspBaseUrl = process.env.PATROL_GO2RTC_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
 const scanEveryMs = Number(process.env.PATROL_PERSON_RECOGNITION_SCAN_MS ?? '5000');
 const maxPendingEventAgeMs = Number(process.env.PATROL_PERSON_RECOGNITION_MAX_EVENT_AGE_MS ?? String(10 * 60 * 1000));
 const cropMargin = Number(process.env.PATROL_PERSON_RECOGNITION_CROP_MARGIN ?? '0.1');
@@ -63,6 +64,7 @@ async function scanOnce() {
       .map((event) => event.payload.sourceEventId)
   );
   const segments = reduceMainRecordingSegments(events);
+  const mainStreamNames = reduceMainStreamNames(events);
   const personAlerts = events
     .filter((event) => event.type === 'annke.alert_stream.message_received')
     .filter((event) => isActivePersonAlert(event.payload.rawXml))
@@ -74,21 +76,15 @@ async function scanOnce() {
       return;
     }
 
-    await analyzePersonAlert(event, segments);
+    await analyzePersonAlert(event, segments, mainStreamNames);
   }
 }
 
-async function analyzePersonAlert(event, segments) {
+async function analyzePersonAlert(event, segments, mainStreamNames) {
   const occurredAtMs = event.payload.receivedAtMs ?? event.ts_ms;
   const sampleId = `${event.id}-person`;
   const segment = preferredMainSegment(segments, event.payload.cameraId, occurredAtMs);
-  if (!segment) {
-    if (Date.now() - occurredAtMs < maxPendingEventAgeMs) {
-      return;
-    }
-    await appendRecognitionFailure(event, sampleId, occurredAtMs, 'No retained main-stream recording segment overlaps the person event.');
-    return;
-  }
+  const mainStreamName = mainStreamNames.get(event.payload.cameraId) ?? null;
 
   try {
     const safeSampleId = safeFileName(sampleId);
@@ -96,15 +92,33 @@ async function analyzePersonAlert(event, segments) {
     const previousFramePath = path.join(framesDir, `${safeSampleId}-previous.jpg`);
     const cropRelativePath = `${safeSampleId}.jpg`;
     const cropPath = path.join(cropsDir, cropRelativePath);
-    const sourcePath = path.join(recordingsDir, segment.relativePath);
-    const sourceOffsetMs = Math.max(0, occurredAtMs - segment.startMs);
-    const previousOffsetMs = Math.max(0, sourceOffsetMs - 2000);
-    await extractFrame(sourcePath, previousOffsetMs, previousFramePath);
-    await extractFrame(sourcePath, sourceOffsetMs, framePath);
     const cropBox = targetCropBox(event.payload.rawXml);
+    let sourceSegmentRelativePath = null;
+    let sourceOffsetMs = null;
+
+    if (segment) {
+      const sourcePath = path.join(recordingsDir, segment.relativePath);
+      sourceOffsetMs = Math.max(0, occurredAtMs - segment.startMs);
+      const previousOffsetMs = Math.max(0, sourceOffsetMs - 2000);
+      await extractFrame(sourcePath, previousOffsetMs, previousFramePath);
+      await extractFrame(sourcePath, sourceOffsetMs, framePath);
+      sourceSegmentRelativePath = segment.relativePath;
+    } else if (mainStreamName && Date.now() - occurredAtMs < maxPendingEventAgeMs) {
+      await captureLiveFrames(mainStreamName, framePath, cropBox ? null : previousFramePath);
+      sourceSegmentRelativePath = `go2rtc:${mainStreamName}`;
+      sourceOffsetMs = 0;
+    } else {
+      const reason = mainStreamName
+        ? 'No retained main-stream recording segment overlaps the person event and the event is too old for a live high-resolution capture.'
+        : 'No main go2rtc stream is configured for this camera.';
+      await appendRecognitionFailure(event, sampleId, occurredAtMs, reason);
+      return;
+    }
+
     const featureprint = await runFeatureprint(framePath, cropPath, cropBox, previousFramePath);
     const detectedCropBox = featureprint.cropBox ?? cropBox;
-    const cropMethod = cropBox ? 'camera_xml' : 'motion_diff';
+    const sourceKind = segment ? 'recording' : 'go2rtc_live';
+    const cropMethod = cropBox ? `camera_xml_${sourceKind}` : `motion_diff_${sourceKind}`;
 
     await appendCameraEvent({
       type: 'person.recognition.sample.analyzed',
@@ -114,7 +128,7 @@ async function analyzePersonAlert(event, segments) {
         cameraId: event.payload.cameraId,
         sourceEventId: event.id,
         occurredAtMs,
-        sourceSegmentRelativePath: segment.relativePath,
+        sourceSegmentRelativePath,
         sourceOffsetMs,
         cropRelativePath,
         cropBox: detectedCropBox,
@@ -178,6 +192,34 @@ async function extractFrame(sourcePath, sourceOffsetMs, outputPath) {
   ]);
 }
 
+async function captureLiveFrames(streamName, framePath, previousFramePath) {
+  const streamUrl = `${go2rtcRtspBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(streamName)}`;
+  if (previousFramePath) {
+    await extractLiveFrame(streamUrl, previousFramePath);
+    await sleep(1000);
+  }
+  await extractLiveFrame(streamUrl, framePath);
+}
+
+async function extractLiveFrame(streamUrl, outputPath) {
+  await runCommand('ffmpeg', [
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-rtsp_transport',
+    'tcp',
+    '-i',
+    streamUrl,
+    '-frames:v',
+    '1',
+    '-q:v',
+    '2',
+    '-y',
+    outputPath
+  ]);
+}
+
 async function runFeatureprint(framePath, cropPath, cropBox, previousFramePath) {
   const args = cropBox
     ? [
@@ -215,6 +257,10 @@ function runCommand(command, args) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function reduceMainRecordingSegments(events) {
   const expiredPaths = new Set(
     events
@@ -234,6 +280,21 @@ function reduceMainRecordingSegments(events) {
       relativePath: event.payload.relativePath
     }))
     .sort((left, right) => right.startMs - left.startMs || left.relativePath.localeCompare(right.relativePath));
+}
+
+function reduceMainStreamNames(events) {
+  const names = new Map();
+  for (const event of events) {
+    if (event.type !== 'go2rtc.config.materialized') {
+      continue;
+    }
+    for (const stream of event.payload.streams ?? []) {
+      if (stream.role === 'main' && stream.cameraId && stream.streamName) {
+        names.set(stream.cameraId, stream.streamName);
+      }
+    }
+  }
+  return names;
 }
 
 function preferredMainSegment(segments, cameraId, occurredAtMs) {
