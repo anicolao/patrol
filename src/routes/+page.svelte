@@ -535,7 +535,7 @@
     const baseUrl = browser ? `${window.location.protocol}//${window.location.hostname}:1984` : 'http://127.0.0.1:1984';
     const params = new URLSearchParams({
       src: camera.streams[stream],
-      mode: 'webrtc,mse,hls',
+      mode: 'mse',
       width: '100%',
       background: 'false'
     });
