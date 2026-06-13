@@ -548,12 +548,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'Vehicle event is shown in history',
+        spec: 'Nearby events are coalesced in history',
         check: async () => {
-          await expect(page.getByTestId('history-event-row')).toHaveCount(2);
-          await expect(page.getByRole('button', { name: /Vehicle/ })).toBeVisible();
-          await expect(page.getByRole('button', { name: /Person/ })).toContainText('Alex 93%');
-          await expect(page.getByTestId('history-event-row').getByText('full quality')).toHaveCount(2);
+          await expect(page.getByTestId('history-event-row')).toHaveCount(1);
+          await expect(page.getByTestId('history-event-row')).toContainText('Vehicle');
+          await expect(page.getByTestId('history-event-row')).toContainText('Person');
+          await expect(page.getByTestId('history-event-row')).toContainText('Alex 93%');
+          await expect(page.getByTestId('history-event-row')).toContainText('full quality');
         }
       },
       {

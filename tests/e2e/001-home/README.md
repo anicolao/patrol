@@ -100,7 +100,7 @@
 **Verifications:**
 - [x] History tab is selected
 - [x] Storage estimate is shown
-- [x] Vehicle event is shown in history
+- [x] Nearby events are coalesced in history
 - [x] Recording player jumps to the event segment
 
 ---
