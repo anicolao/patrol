@@ -20,7 +20,7 @@ const go2rtcRtspBaseUrl = process.env.PATROL_GO2RTC_RTSP_BASE_URL ?? 'rtsp://127
 const scanEveryMs = Number(process.env.PATROL_PERSON_RECOGNITION_SCAN_MS ?? '5000');
 const maxPendingEventAgeMs = Number(process.env.PATROL_PERSON_RECOGNITION_MAX_EVENT_AGE_MS ?? String(10 * 60 * 1000));
 const cropMargin = Number(process.env.PATROL_PERSON_RECOGNITION_CROP_MARGIN ?? '0.1');
-const cropVersion = 'motion-diff-v2';
+const cropVersion = 'motion-diff-v3';
 
 await mkdir(cropsDir, { recursive: true, mode: 0o700 });
 await mkdir(framesDir, { recursive: true, mode: 0o700 });

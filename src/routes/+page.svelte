@@ -26,6 +26,7 @@
   const highConfidencePersonScore = 0.8;
   const historyPersonScore = 0.85;
   const suggestedPersonScore = 0.3;
+  const reviewablePersonCropVersion = 'motion-diff-v3';
 
   type PersonTriageGroup = {
     key: string;
@@ -78,7 +79,12 @@
   $: selectedRecordingQuality = selectedReviewEvent ? recordingQualityLabel(selectedReviewEvent) : 'no recording';
   $: personSamples = discoveryState?.people?.samples ?? [];
   $: reviewablePersonSamples = personSamples.filter(
-    (sample) => sample.status === 'analyzed' && sample.cropUrl && !sample.label && !sample.dismissedAtMs
+    (sample) =>
+      sample.status === 'analyzed' &&
+      sample.cropUrl &&
+      sample.cropVersion === reviewablePersonCropVersion &&
+      !sample.label &&
+      !sample.dismissedAtMs
   );
   $: highConfidencePersonGroups = groupPersonSamples(
     reviewablePersonSamples.filter(
@@ -929,7 +935,7 @@
         <div class="people-summary" data-testid="people-summary">
           <div>
             <span>Unknown</span>
-            <strong>{discoveryState.people.unlabeledCount}</strong>
+            <strong>{reviewablePersonSamples.length}</strong>
           </div>
           <div>
             <span>Labeled</span>
@@ -1149,7 +1155,7 @@
             {/each}
           </datalist>
         {:else}
-          <p class="notice">No person crops have been captured yet. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
+          <p class="notice">No current person crops are ready for review. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
         {/if}
       {:else}
         <p class="notice">Person recognition state has not been replayed yet.</p>

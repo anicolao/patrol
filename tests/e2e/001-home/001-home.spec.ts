@@ -1034,7 +1034,7 @@ function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people
         cropUrl: '/api/person-recognition/crops?path=annke-alert-human-alex-reference-person.jpg',
         cropBox: null,
         cropMethod: 'motion_diff',
-        cropVersion: 'motion-diff-v2',
+        cropVersion: 'motion-diff-v3',
         sourceSegmentRelativePath: 'driveway_main/1781099190.mp4',
         sourceOffsetMs: 2000,
         embedding: {
@@ -1060,7 +1060,7 @@ function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people
         cropUrl: '/api/person-recognition/crops?path=annke-alert-human-guid-reference-person.jpg',
         cropBox: null,
         cropMethod: 'motion_diff',
-        cropVersion: 'motion-diff-v2',
+        cropVersion: 'motion-diff-v3',
         sourceSegmentRelativePath: 'driveway_main/1781099192.mp4',
         sourceOffsetMs: 2000,
         embedding: {
@@ -1086,7 +1086,7 @@ function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people
         cropUrl: '/api/person-recognition/crops?path=annke-alert-human-1-person.jpg',
         cropBox: null,
         cropMethod: 'motion_diff',
-        cropVersion: 'motion-diff-v2',
+        cropVersion: 'motion-diff-v3',
         sourceSegmentRelativePath: 'driveway_main/1781099196.mp4',
         sourceOffsetMs: 4000,
         embedding: {
@@ -1112,7 +1112,7 @@ function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people
         cropUrl: '/api/person-recognition/crops?path=annke-alert-human-3-person.jpg',
         cropBox: null,
         cropMethod: 'motion_diff',
-        cropVersion: 'motion-diff-v2',
+        cropVersion: 'motion-diff-v3',
         sourceSegmentRelativePath: 'driveway_main/1781099195.mp4',
         sourceOffsetMs: 4000,
         embedding: {
@@ -1138,7 +1138,7 @@ function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people
         cropUrl: null,
         cropBox: null,
         cropMethod: null,
-        cropVersion: 'motion-diff-v2',
+        cropVersion: 'motion-diff-v3',
         sourceSegmentRelativePath: null,
         sourceOffsetMs: null,
         embedding: null,
