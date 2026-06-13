@@ -22,7 +22,7 @@
   };
 
   const liveEventPort = '5186';
-  const localStateCacheKey = 'patrol.camera_state.v3';
+  const localStateCacheKey = 'patrol.camera_state.v4';
   const highConfidencePersonScore = 0.8;
   const historyPersonScore = 0.85;
   const suggestedPersonScore = 0.3;
