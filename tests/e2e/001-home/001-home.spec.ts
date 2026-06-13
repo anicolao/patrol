@@ -745,7 +745,7 @@ test('cached snapshot boots without fetching server state', async ({ page }) => 
 
   await page.clock.install({ time: fixedNowMs });
   await page.addInitScript((snapshot) => {
-    window.localStorage.setItem('patrol.camera_state.v3', JSON.stringify(snapshot));
+    window.localStorage.setItem('patrol.camera_state.v4', JSON.stringify(snapshot));
   }, cachedSnapshot);
   await page.addInitScript(() => {
     class PatrolWebSocketMock extends EventTarget {

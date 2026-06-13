@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { browser } from '$app/environment';
   import type {
     CameraDiscoveryState,
     DiscoveredCamera,
     PersonRecognitionSample,
+    RecordingSegment,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
   import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
@@ -20,6 +21,20 @@
     source: string | null;
     summary: string;
   };
+  type HistoryTimelineRow =
+    | {
+        type: 'event';
+        id: string;
+        timeMs: number;
+        event: ReviewableSecurityEvent;
+      }
+    | {
+        type: 'blank';
+        id: string;
+        timeMs: number;
+        startMs: number;
+        endMs: number;
+      };
 
   const liveEventPort = '5186';
   const localStateCacheKey = 'patrol.camera_state.v4';
@@ -57,8 +72,12 @@
   let processGreenCount = 0;
   let allProcessesGreen = false;
   let selectedReviewEvent: ReviewableSecurityEvent | null = null;
+  let selectedHistoryTimeMs: number | null = null;
   let selectedRecordingSource: string | null = null;
   let selectedRecordingQuality = 'no recording';
+  let historyTimelineRows: HistoryTimelineRow[] = [];
+  let historyTimelineElement: HTMLElement | null = null;
+  let historyScrollFrame: number | null = null;
   let personSamples: PersonRecognitionSample[] = [];
   let reviewablePersonSamples: PersonRecognitionSample[] = [];
   let highConfidencePersonGroups: PersonTriageGroup[] = [];
@@ -71,12 +90,29 @@
   $: allProcessesGreen =
     (discoveryState?.processes.length ?? 0) > 0 &&
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
-  $: selectedReviewEvent =
-    (discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ??
-    (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment) ??
-    null;
-  $: selectedRecordingSource = selectedReviewEvent ? recordingSource(selectedReviewEvent) : null;
-  $: selectedRecordingQuality = selectedReviewEvent ? recordingQualityLabel(selectedReviewEvent) : 'no recording';
+  $: if (selectedHistoryTimeMs === null) {
+    const defaultReviewEvent = (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment);
+    if (defaultReviewEvent) {
+      selectedReviewEventId = defaultReviewEvent.id;
+      selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+    }
+  }
+  $: selectedReviewEvent = selectedReviewEventId
+    ? ((discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ?? null)
+    : null;
+  $: historyTimelineRows = buildHistoryTimelineRows(discoveryState?.recordings.events ?? []);
+  $: selectedRecordingSource =
+    selectedHistoryTimeMs !== null
+      ? recordingSourceForTime(discoveryState?.recordings.segments ?? [], selectedHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingSource(selectedReviewEvent)
+        : null;
+  $: selectedRecordingQuality =
+    selectedHistoryTimeMs !== null
+      ? recordingQualityLabelForTime(discoveryState?.recordings.segments ?? [], selectedHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingQualityLabel(selectedReviewEvent)
+        : 'no recording';
   $: personSamples = discoveryState?.people?.samples ?? [];
   $: reviewablePersonSamples = personSamples.filter(
     (sample) =>
@@ -610,6 +646,156 @@
 
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
+    selectedHistoryTimeMs = event.occurredAtMs;
+    void centerHistoryTimelineRow(`event-${event.id}`);
+  }
+
+  function selectTimelineBlank(row: Extract<HistoryTimelineRow, { type: 'blank' }>) {
+    selectedReviewEventId = null;
+    selectedHistoryTimeMs = row.timeMs;
+    void centerHistoryTimelineRow(row.id);
+  }
+
+  async function centerHistoryTimelineRow(rowId: string) {
+    await tick();
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const row = historyTimelineElement.querySelector<HTMLElement>(`[data-history-row-id="${CSS.escape(rowId)}"]`);
+    if (!row) {
+      return;
+    }
+
+    const targetTop = row.offsetTop + row.offsetHeight / 2 - historyTimelineElement.clientHeight / 2;
+    historyTimelineElement.scrollTo({
+      top: Math.max(0, targetTop),
+      behavior: 'smooth'
+    });
+  }
+
+  function handleHistoryTimelineScroll() {
+    if (historyScrollFrame !== null || !browser) {
+      return;
+    }
+
+    historyScrollFrame = window.requestAnimationFrame(() => {
+      historyScrollFrame = null;
+      updateHistoryPlayheadFromScroll();
+    });
+  }
+
+  function updateHistoryPlayheadFromScroll() {
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const timelineRect = historyTimelineElement.getBoundingClientRect();
+    const playheadY = timelineRect.top + timelineRect.height / 2;
+    const rows = Array.from(historyTimelineElement.querySelectorAll<HTMLElement>('[data-history-time-ms]'));
+    let nearest: HTMLElement | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      const distance = Math.abs(rect.top + rect.height / 2 - playheadY);
+      if (distance < nearestDistance) {
+        nearest = row;
+        nearestDistance = distance;
+      }
+    }
+
+    if (!nearest) {
+      return;
+    }
+
+    const timeMs = Number(nearest.dataset.historyTimeMs);
+    if (Number.isFinite(timeMs) && selectedHistoryTimeMs !== timeMs) {
+      selectedHistoryTimeMs = timeMs;
+    }
+
+    selectedReviewEventId = nearest.dataset.historyEventId ?? null;
+  }
+
+  function buildHistoryTimelineRows(events: ReviewableSecurityEvent[]): HistoryTimelineRow[] {
+    const sortedEvents = [...events].sort(
+      (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
+    );
+    const rows: HistoryTimelineRow[] = [];
+    const minimumVisibleGapMs = 2 * 60 * 1000;
+
+    sortedEvents.forEach((event, index) => {
+      rows.push({
+        type: 'event',
+        id: `event-${event.id}`,
+        timeMs: event.occurredAtMs,
+        event
+      });
+
+      const nextEvent = sortedEvents[index + 1];
+      if (!nextEvent) {
+        return;
+      }
+
+      const gapMs = event.occurredAtMs - nextEvent.occurredAtMs;
+      if (gapMs >= minimumVisibleGapMs) {
+        rows.push({
+          type: 'blank',
+          id: `blank-${event.id}-${nextEvent.id}`,
+          startMs: nextEvent.occurredAtMs,
+          endMs: event.occurredAtMs,
+          timeMs: nextEvent.occurredAtMs + Math.floor(gapMs / 2)
+        });
+      }
+    });
+
+    return rows;
+  }
+
+  function historyTimelineRowStyle(row: HistoryTimelineRow) {
+    if (row.type === 'event') {
+      return 'min-height: 112px;';
+    }
+
+    const durationMinutes = Math.max(1, (row.endMs - row.startMs) / 60000);
+    const height = Math.min(220, Math.max(56, durationMinutes * 10));
+    return `min-height: ${height}px;`;
+  }
+
+  function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
+    const cameraId = selectedReviewEvent?.cameraId ?? configuredCameras[0]?.id ?? null;
+    const candidates = segments.filter(
+      (segment) =>
+        (!cameraId || segment.cameraId === cameraId) &&
+        timeMs >= segment.startMs &&
+        timeMs <= segment.endMs
+    );
+
+    return (
+      candidates.find((segment) => segment.role === 'main') ??
+      candidates.find((segment) => segment.role === 'sub') ??
+      null
+    );
+  }
+
+  function recordingSourceForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return null;
+    }
+
+    const params = new URLSearchParams({ path: segment.relativePath });
+    const offsetSeconds = Math.max(0, Math.floor((timeMs - segment.startMs) / 1000));
+    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
+  }
+
+  function recordingQualityLabelForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return 'no recording';
+    }
+
+    return segment.role === 'main' ? 'full quality' : 'substream';
   }
 
   function recordingSource(event: ReviewableSecurityEvent) {
@@ -652,6 +838,23 @@
     }
 
     return `${personLabelDisplay(suggestedSample.suggestedLabel)} ${Math.round(suggestedSample.suggestedScore * 100)}%`;
+  }
+
+  function historyEventThumbnailUrl(event: ReviewableSecurityEvent) {
+    return (
+      personSamples.find((sample) => sample.sourceEventId === event.sourceEventId && sample.cropUrl)?.cropUrl ?? null
+    );
+  }
+
+  function formatTimelineTime(tsMs: number) {
+    return new Date(tsMs).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function formatTimelineRange(startMs: number, endMs: number) {
+    return `${formatTimelineTime(startMs)} - ${formatTimelineTime(endMs)}`;
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -1191,21 +1394,31 @@
           </div>
         </div>
 
-        {#if selectedReviewEvent}
-          {@const selectedEvent = selectedReviewEvent}
-          {@const selectedPersonLabel = historyPersonLabel(selectedEvent)}
+        {#if discoveryState.recordings.events.length > 0}
+          <div class="history-workspace">
             <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
               <div class="recording-player-header">
                 <div>
-                  <h3>{selectedEvent.label}</h3>
-                  {#if selectedPersonLabel}
-                    <p class="history-person-label">{selectedPersonLabel}</p>
+                  {#if selectedReviewEvent}
+                    {@const selectedEvent = selectedReviewEvent}
+                    {@const selectedPersonLabel = historyPersonLabel(selectedEvent)}
+                    <h3>{selectedEvent.label}</h3>
+                    {#if selectedPersonLabel}
+                      <p class="history-person-label">{selectedPersonLabel}</p>
+                    {/if}
+                    <p>
+                      {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedEvent.occurredAtMs)}
+                      · {selectedRecordingQuality}
+                    </p>
+                  {:else if selectedHistoryTimeMs !== null}
+                    <h3>Timeline position</h3>
+                    <p>
+                      {configuredCameras[0]?.name ?? configuredCameras[0]?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedHistoryTimeMs)}
+                      · {selectedRecordingQuality}
+                    </p>
                   {/if}
-                  <p>
-                    {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                    · {formatDateTime(selectedEvent.occurredAtMs)}
-                    · {selectedRecordingQuality}
-                  </p>
                 </div>
               </div>
               {#if selectedRecordingSource}
@@ -1221,39 +1434,89 @@
                 {/key}
               {:else}
                 <p class="notice compact">
-                  No retained recording segment currently overlaps this event.
+                  No retained recording segment currently overlaps the playhead.
                 </p>
               {/if}
             </section>
-        {/if}
 
-        {#if discoveryState.recordings.events.length > 0}
-          <ol class="history-list" aria-label="Observed security events">
-            {#each discoveryState.recordings.events as event}
-              {@const eventPersonLabel = historyPersonLabel(event)}
-              <li data-testid="history-event-row">
-                <button
-                  type="button"
-                  class="history-event"
-                  class:active={event.id === selectedReviewEventId}
-                  disabled={!event.preferredSegment}
-                  onclick={() => selectReviewEvent(event)}
-                >
-                  <span>
-                    <strong>{event.label}</strong>
-                    {#if eventPersonLabel}
-                      <small class="history-person-label">{eventPersonLabel}</small>
-                    {/if}
-                    <small>
-                      {cameraById(event.cameraId)?.name ?? cameraById(event.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                      · {formatDateTime(event.occurredAtMs)}
-                    </small>
-                  </span>
-                  <span>{recordingQualityLabel(event)}</span>
-                </button>
-              </li>
-            {/each}
-          </ol>
+            <section class="history-timeline-panel" aria-label="Video history timeline">
+              <div class="history-timeline-header">
+                <div>
+                  <h3>Timeline</h3>
+                  <p>Scroll the timeline under the fixed playhead to scrub video.</p>
+                </div>
+                {#if selectedHistoryTimeMs !== null}
+                  <strong>{formatDateTime(selectedHistoryTimeMs)}</strong>
+                {/if}
+              </div>
+
+              <div
+                class="history-timeline"
+                bind:this={historyTimelineElement}
+                onscroll={handleHistoryTimelineScroll}
+                data-testid="history-timeline"
+              >
+                <div class="history-playhead" aria-hidden="true">
+                  <span></span>
+                </div>
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+                {#each historyTimelineRows as row}
+                  {#if row.type === 'event'}
+                    {@const eventPersonLabel = historyPersonLabel(row.event)}
+                    {@const thumbnailUrl = historyEventThumbnailUrl(row.event)}
+                    <button
+                      type="button"
+                      class="history-timeline-row history-event"
+                      class:active={row.event.id === selectedReviewEventId}
+                      style={historyTimelineRowStyle(row)}
+                      disabled={!row.event.preferredSegment}
+                      data-testid="history-event-row"
+                      data-history-row-id={row.id}
+                      data-history-time-ms={row.timeMs}
+                      data-history-event-id={row.event.id}
+                      onclick={() => selectReviewEvent(row.event)}
+                    >
+                      <span class="history-time-rail">{formatTimelineTime(row.timeMs)}</span>
+                      <span class="history-event-thumb" aria-hidden="true">
+                        {#if thumbnailUrl}
+                          <img src={thumbnailUrl} alt="" />
+                        {:else}
+                          {row.event.label.slice(0, 1)}
+                        {/if}
+                      </span>
+                      <span class="history-event-body">
+                        <strong>{row.event.label}</strong>
+                        {#if eventPersonLabel}
+                          <small class="history-person-label">{eventPersonLabel}</small>
+                        {/if}
+                        <small>
+                          {cameraById(row.event.cameraId)?.name ?? cameraById(row.event.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                          · {formatDateTime(row.event.occurredAtMs)}
+                        </small>
+                      </span>
+                      <span class="history-quality">{recordingQualityLabel(row.event)}</span>
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      class="history-timeline-row history-blank"
+                      style={historyTimelineRowStyle(row)}
+                      data-history-row-id={row.id}
+                      data-history-time-ms={row.timeMs}
+                      onclick={() => selectTimelineBlank(row)}
+                    >
+                      <span class="history-time-rail">{formatTimelineTime(row.timeMs)}</span>
+                      <span class="history-blank-body">
+                        <strong>{formatTimelineRange(row.startMs, row.endMs)}</strong>
+                        <small>Quiet period. Tap to center this time under the playhead.</small>
+                      </span>
+                    </button>
+                  {/if}
+                {/each}
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+              </div>
+            </section>
+          </div>
         {:else}
           <p class="notice">No vehicle, person, or motion events have been observed yet.</p>
         {/if}
@@ -1871,8 +2134,7 @@
 
   .camera-grid,
   .settings-list,
-  .health-list,
-  .history-list {
+  .health-list {
     display: grid;
     gap: 12px;
     margin: 0;
@@ -2103,8 +2365,164 @@
     background: #111827;
   }
 
-  .history-list li {
+  .history-workspace {
+    display: grid;
+    gap: 12px;
+  }
+
+  .history-timeline-panel {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .history-timeline-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .history-timeline-header h3,
+  .history-timeline-header p {
+    margin-bottom: 0;
+  }
+
+  .history-timeline-header p {
+    color: #66727f;
+  }
+
+  .history-timeline-header strong {
+    color: #1f4f82;
+    font-size: 0.86rem;
+    white-space: nowrap;
+  }
+
+  .history-timeline {
+    position: relative;
+    display: grid;
+    gap: 8px;
+    max-height: min(58vh, 640px);
+    min-height: 360px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background:
+      linear-gradient(90deg, #f6f8fa 0 72px, transparent 72px),
+      #ffffff;
+  }
+
+  .history-timeline-padding {
+    height: 168px;
+  }
+
+  .history-playhead {
+    position: sticky;
+    top: 50%;
+    z-index: 5;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .history-playhead span {
+    position: absolute;
+    right: 0;
+    left: 0;
+    display: block;
+    border-top: 2px solid #c82232;
+    box-shadow: 0 0 0 1px rgba(200, 34, 50, 0.12);
+  }
+
+  .history-playhead span::before {
+    position: absolute;
+    top: -7px;
+    left: 58px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: #c82232;
+    content: '';
+  }
+
+  .history-timeline-row {
+    display: grid;
+    grid-template-columns: 64px 52px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
     margin: 0;
+    border: 0;
+    border-radius: 0;
+    border-top: 1px solid #edf0f3;
+    background: transparent;
+    color: #171a1f;
+    text-align: left;
+  }
+
+  .history-timeline-row.history-event {
+    padding: 12px;
+  }
+
+  .history-timeline-row.history-event.active {
+    border-color: #bad3ea;
+    background: #f2f7fc;
+  }
+
+  .history-time-rail {
+    color: #66727f;
+    font-size: 0.78rem;
+    font-weight: 800;
+    text-align: right;
+  }
+
+  .history-event-thumb {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    overflow: hidden;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    background: #eef2f5;
+    color: #1f4f82;
+    font-weight: 900;
+  }
+
+  .history-event-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .history-event-body {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .history-event-body small,
+  .history-blank-body small {
+    color: #66727f;
+  }
+
+  .history-quality {
+    color: #3d4752;
+    font-size: 0.78rem;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .history-blank {
+    grid-template-columns: 64px minmax(0, 1fr);
+    padding: 10px 12px;
+    border-top-style: dashed;
+    color: #66727f;
+  }
+
+  .history-blank-body {
+    display: grid;
+    gap: 3px;
   }
 
   .history-event {
@@ -2145,6 +2563,43 @@
   .history-person-label {
     color: #1f4f82;
     font-weight: 800;
+  }
+
+  .history-timeline-row.history-event {
+    display: grid;
+    grid-template-columns: 64px 52px minmax(0, 1fr) auto;
+    justify-content: stretch;
+    border-color: #edf0f3;
+    background: transparent;
+    padding: 12px;
+  }
+
+  .history-timeline-row.history-event > span:first-child,
+  .history-timeline-row.history-event > span:last-child {
+    display: block;
+    min-width: 0;
+  }
+
+  .history-timeline-row.history-event.active {
+    border-color: #bad3ea;
+    background: #f2f7fc;
+  }
+
+  @media (orientation: landscape) and (min-width: 760px) {
+    .history-workspace {
+      grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+      align-items: start;
+    }
+
+    .recording-player {
+      position: sticky;
+      top: 16px;
+      margin-bottom: 0;
+    }
+
+    .history-timeline {
+      max-height: min(72vh, 760px);
+    }
   }
 
   .empty-state {
