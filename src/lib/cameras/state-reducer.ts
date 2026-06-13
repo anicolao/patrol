@@ -810,6 +810,15 @@ function withPersonRecognitionSampleFailed(
 ): CameraDiscoveryState {
   const people = personRecognitionState(state);
   const existing = people.samples.find((candidate) => candidate.id === event.payload.sampleId);
+  if (existing?.status === 'analyzed') {
+    return withProcessEvent(state, 'patrol-person-recognizer', {
+      tsMs: event.ts_ms,
+      eventType: event.type,
+      detail: `Ignored later failure for analyzed person sample ${event.payload.sampleId}`,
+      healthOverride: null
+    });
+  }
+
   const sample: PersonRecognitionSample = {
     id: event.payload.sampleId,
     cameraId: event.payload.cameraId,
@@ -1042,6 +1051,10 @@ function buildPersonRecognitionState(events: PatrolEvent[]): PersonRecognitionSt
     if (event.type === 'person.recognition.sample.failed') {
       const failed = event as PatrolEvent<PersonRecognitionSampleFailedPayload>;
       const existing = samples.find((candidate) => candidate.id === failed.payload.sampleId);
+      if (existing?.status === 'analyzed') {
+        continue;
+      }
+
       const sample: PersonRecognitionSample = {
         id: failed.payload.sampleId,
         cameraId: failed.payload.cameraId,
