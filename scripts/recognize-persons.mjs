@@ -29,6 +29,7 @@ await ensureFeatureprintHelper();
 
 let stopping = false;
 let scanInterval = null;
+let scanning = false;
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-person-recognizer',
   label: 'Person recognition worker',
@@ -45,10 +46,23 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 await scanOnce();
 scanInterval = setInterval(() => {
-  void scanOnce().catch((error) => {
+  void scanOnceIfIdle().catch((error) => {
     console.error('person recognition scan failed:', error);
   });
 }, scanEveryMs);
+
+async function scanOnceIfIdle() {
+  if (scanning) {
+    return;
+  }
+
+  scanning = true;
+  try {
+    await scanOnce();
+  } finally {
+    scanning = false;
+  }
+}
 
 async function scanOnce() {
   const events = await readJsonlDir(eventsDir, 'cameras-');
