@@ -7,10 +7,11 @@ import {
   appendProcessExited,
   startProcessHeartbeats
 } from './lib/patrol-events.mjs';
+import { patrolDataRoot, patrolRecordingsDir } from './lib/patrol-paths.mjs';
 
-const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
+const dataRoot = patrolDataRoot();
 const eventsDir = path.join(dataRoot, 'events');
-const recordingsDir = path.join(dataRoot, 'recordings');
+const recordingsDir = patrolRecordingsDir(dataRoot);
 const recognizerDir = path.join(dataRoot, 'person-recognition');
 const cropsDir = path.join(recognizerDir, 'crops');
 const framesDir = path.join(recognizerDir, 'frames');
