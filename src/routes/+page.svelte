@@ -6,6 +6,10 @@
     DiscoveredCamera,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
+  import {
+    loadCachedCameraStateSnapshot,
+    scheduleCameraStateSnapshotPersist
+  } from '$lib/client/camera-state-cache';
   import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
   import type { CameraStateSnapshot, EventCursor, PatrolEvent, StreamedPatrolEvent } from '$lib/events';
 
@@ -21,7 +25,6 @@
   };
 
   const liveEventPort = '5186';
-  const localStateCacheKey = 'patrol.camera_state.v2';
 
   let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
@@ -60,15 +63,19 @@
 
   onMount(() => {
     hydrated = true;
-    const loadedCachedState = loadCachedDiscoveryState();
     let stopEventSocket: (() => void) | null = null;
     let stopped = false;
-    const bootstrap = loadedCachedState ? Promise.resolve() : loadDiscoveryState();
-    void bootstrap.finally(() => {
+
+    void (async () => {
+      const loadedCachedState = await loadCachedDiscoveryState();
+      if (!loadedCachedState) {
+        await loadDiscoveryState();
+      }
       if (!stopped) {
         stopEventSocket = connectEventSocket();
       }
-    });
+    })();
+
     void sendSystemHeartbeat();
     const interval = window.setInterval(() => {
       nowMs = Date.now();
@@ -327,27 +334,18 @@
     persistCameraSnapshot(snapshot);
   }
 
-  function loadCachedDiscoveryState() {
+  async function loadCachedDiscoveryState() {
     if (!browser) {
       return false;
     }
 
-    try {
-      const rawCache = window.localStorage.getItem(localStateCacheKey);
-      if (!rawCache) {
-        return false;
-      }
-      const snapshot = JSON.parse(rawCache) as CameraStateSnapshot;
-      if (!isCameraStateSnapshot(snapshot)) {
-        window.localStorage.removeItem(localStateCacheKey);
-        return false;
-      }
+    const snapshot = await loadCachedCameraStateSnapshot();
+    if (snapshot) {
       cameraSnapshot = snapshot;
       return true;
-    } catch {
-      window.localStorage.removeItem(localStateCacheKey);
-      return false;
     }
+
+    return false;
   }
 
   function persistCameraSnapshot(snapshot: CameraStateSnapshot) {
@@ -355,11 +353,7 @@
       return;
     }
 
-    try {
-      window.localStorage.setItem(localStateCacheKey, JSON.stringify(snapshot));
-    } catch {
-      // Browser storage is an optimization; the server state endpoint remains authoritative.
-    }
+    scheduleCameraStateSnapshotPersist(snapshot);
   }
 
   function isCameraStateSnapshot(value: unknown): value is CameraStateSnapshot {

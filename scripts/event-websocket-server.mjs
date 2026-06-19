@@ -140,7 +140,7 @@ async function sendCatchUpEvents(socket, cursor) {
   }
 
   const events = [];
-  for (const file of await listEventFiles()) {
+  for (const file of await listCatchUpEventFiles(cursor)) {
     const stream = streamFromFile(file);
     const filePath = path.join(eventsDir, file);
     const chunk = await readRange(filePath, 0, (await stat(filePath)).size);
@@ -175,12 +175,26 @@ async function sendCatchUpEvents(socket, cursor) {
   });
 }
 
+async function listCatchUpEventFiles(cursor) {
+  const files = await listEventFiles();
+  const cursorDay = new Date(cursor.ts_ms).toISOString().slice(0, 10);
+
+  return files.filter((file) => {
+    const fileDay = dayFromEventFile(file);
+    return !fileDay || fileDay >= cursorDay;
+  });
+}
+
 async function listEventFiles() {
   const entries = await readdir(eventsDir);
   return entries
     .filter((entry) => streams.some((stream) => entry.startsWith(`${stream}-`)))
     .filter((entry) => entry.endsWith('.jsonl'))
     .sort();
+}
+
+function dayFromEventFile(file) {
+  return file.match(/^[^-]+-(\d{4}-\d{2}-\d{2})\.jsonl$/)?.[1] ?? null;
 }
 
 function readRange(filePath, start, end) {
