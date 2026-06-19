@@ -5,3 +5,4 @@ build/
 playwright-report/
 test-results/
 .patrol/
+.env.local
