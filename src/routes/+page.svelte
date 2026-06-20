@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { browser } from '$app/environment';
   import type {
     CameraDiscoveryState,
     DiscoveredCamera,
+    RecordingSegment,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
   import {
@@ -24,9 +25,32 @@
     source: string | null;
     summary: string;
   };
+  type HistoryTimelineGroup = {
+    id: string;
+    startMs: number;
+    endMs: number;
+    timeMs: number;
+    events: ReviewableSecurityEvent[];
+  };
+  type HistoryTimelineTick = {
+    id: string;
+    timeMs: number;
+    label: string;
+  };
+  type HistoryTimeline = {
+    startMs: number;
+    endMs: number;
+    heightPx: number;
+    groups: HistoryTimelineGroup[];
+    ticks: HistoryTimelineTick[];
+  };
 
   const liveEventPort = '5186';
   const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
+  const historyTimelinePixelsPerMinute = 18;
+  const historyTimelineBucketMs = 5 * 60 * 1000;
+  const historyTimelinePaddingPx = 168;
+  const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
 
   let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
@@ -48,20 +72,49 @@
   let processGreenCount = 0;
   let allProcessesGreen = false;
   let selectedReviewEvent: ReviewableSecurityEvent | null = null;
+  let selectedHistoryCameraId: string | null = null;
+  let selectedHistoryTimeMs: number | null = null;
+  let playbackHistoryTimeMs: number | null = null;
   let selectedRecordingSource: string | null = null;
   let selectedRecordingQuality = 'no recording';
+  let historyEvents: ReviewableSecurityEvent[] = [];
+  let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
+  let historyTimelineElement: HTMLElement | null = null;
+  let historyScrollFrame: number | null = null;
+  let historyPlaybackCommitTimer: number | null = null;
   $: discoveryState = cameraSnapshot?.state ?? null;
   $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
   $: allProcessesGreen =
     (discoveryState?.processes.length ?? 0) > 0 &&
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
-  $: selectedReviewEvent =
-    (discoveryState?.recordings.events ?? []).find((event) => event.id === selectedReviewEventId) ??
-    (discoveryState?.recordings.events ?? []).find((event) => event.preferredSegment) ??
-    null;
-  $: selectedRecordingSource = selectedReviewEvent ? recordingSource(selectedReviewEvent) : null;
-  $: selectedRecordingQuality = selectedReviewEvent ? recordingQualityLabel(selectedReviewEvent) : 'no recording';
+  $: historyEvents = selectedHistoryCameraId
+    ? (discoveryState?.recordings.events ?? []).filter((event) => event.cameraId === selectedHistoryCameraId)
+    : (discoveryState?.recordings.events ?? []);
+  $: if (selectedHistoryTimeMs === null) {
+    const defaultReviewEvent = historyEvents.find((event) => event.preferredSegment);
+    if (defaultReviewEvent) {
+      selectedReviewEventId = defaultReviewEvent.id;
+      selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+      playbackHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+    }
+  }
+  $: selectedReviewEvent = selectedReviewEventId
+    ? (historyEvents.find((event) => event.id === selectedReviewEventId) ?? null)
+    : null;
+  $: historyTimeline = buildHistoryTimeline(historyEvents);
+  $: selectedRecordingSource =
+    playbackHistoryTimeMs !== null
+      ? recordingSourceForTime(discoveryState?.recordings.segments ?? [], playbackHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingSource(selectedReviewEvent)
+        : null;
+  $: selectedRecordingQuality =
+    playbackHistoryTimeMs !== null
+      ? recordingQualityLabelForTime(discoveryState?.recordings.segments ?? [], playbackHistoryTimeMs)
+      : selectedReviewEvent
+        ? recordingQualityLabel(selectedReviewEvent)
+        : 'no recording';
 
   onMount(() => {
     hydrated = true;
@@ -94,6 +147,9 @@
       stopped = true;
       window.clearInterval(interval);
       window.clearInterval(heartbeatInterval);
+      if (historyPlaybackCommitTimer) {
+        window.clearTimeout(historyPlaybackCommitTimer);
+      }
       stopEventSocket?.();
     };
   });
@@ -338,7 +394,35 @@
   function setCameraSnapshot(snapshot: CameraStateSnapshot) {
     const compacted = compactCameraStateSnapshot(snapshot);
     cameraSnapshot = compacted;
+    ensureHistorySelection(compacted.state);
     persistCameraSnapshot(compacted);
+  }
+
+  function ensureHistorySelection(state: CameraDiscoveryState) {
+    const credentialedCameras = state.devices.filter((camera) => camera.credentials);
+    if (credentialedCameras.length === 0) {
+      selectedHistoryCameraId = null;
+      selectedReviewEventId = null;
+      selectedHistoryTimeMs = null;
+      playbackHistoryTimeMs = null;
+      return;
+    }
+
+    if (!selectedHistoryCameraId || !credentialedCameras.some((camera) => camera.id === selectedHistoryCameraId)) {
+      const defaultReviewEvent = state.recordings.events.find((event) => event.preferredSegment);
+      selectedHistoryCameraId = defaultReviewEvent?.cameraId ?? credentialedCameras[0].id;
+    }
+
+    if (selectedHistoryTimeMs === null) {
+      const defaultReviewEvent = state.recordings.events.find(
+        (event) => event.cameraId === selectedHistoryCameraId && event.preferredSegment
+      );
+      if (defaultReviewEvent) {
+        selectedReviewEventId = defaultReviewEvent.id;
+        selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+        playbackHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+      }
+    }
   }
 
   async function loadCachedDiscoveryState() {
@@ -441,6 +525,14 @@
 
   function cameraById(cameraId: string) {
     return discoveryState?.devices.find((camera) => camera.id === cameraId) ?? null;
+  }
+
+  function selectedHistoryCamera() {
+    return selectedHistoryCameraId ? cameraById(selectedHistoryCameraId) : null;
+  }
+
+  function historyCameraEventCount(cameraId: string) {
+    return (discoveryState?.recordings.events ?? []).filter((event) => event.cameraId === cameraId).length;
   }
 
   function go2rtcStreamPath(camera: DiscoveredCamera, stream: 'main' | 'sub') {
@@ -558,6 +650,314 @@
 
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
+    selectedHistoryCameraId = event.cameraId;
+    selectedHistoryTimeMs = event.occurredAtMs;
+    commitHistoryPlayback(event.occurredAtMs);
+    void centerHistoryTimelineTime(event.occurredAtMs);
+  }
+
+  function selectTimelineTime(timeMs: number) {
+    selectedReviewEventId = null;
+    selectedHistoryTimeMs = timeMs;
+    commitHistoryPlayback(timeMs);
+    void centerHistoryTimelineTime(timeMs);
+  }
+
+  function selectTimelineGroup(group: HistoryTimelineGroup) {
+    const event = group.events[0] ?? null;
+    if (event) {
+      selectReviewEvent(event);
+    }
+  }
+
+  function selectHistoryCamera(cameraId: string) {
+    if (cameraId === selectedHistoryCameraId) {
+      return;
+    }
+
+    selectedHistoryCameraId = cameraId;
+    const event = (discoveryState?.recordings.events ?? []).find(
+      (candidate) => candidate.cameraId === cameraId && candidate.preferredSegment
+    );
+    selectedReviewEventId = event?.id ?? null;
+    selectedHistoryTimeMs = event?.occurredAtMs ?? selectedHistoryTimeMs;
+    if (selectedHistoryTimeMs !== null) {
+      commitHistoryPlayback(selectedHistoryTimeMs);
+      void centerHistoryTimelineTime(selectedHistoryTimeMs);
+    }
+  }
+
+  function scheduleHistoryPlaybackCommit(timeMs: number) {
+    if (!browser) {
+      playbackHistoryTimeMs = timeMs;
+      return;
+    }
+
+    if (historyPlaybackCommitTimer) {
+      window.clearTimeout(historyPlaybackCommitTimer);
+    }
+
+    historyPlaybackCommitTimer = window.setTimeout(() => {
+      historyPlaybackCommitTimer = null;
+      commitHistoryPlayback(timeMs);
+    }, 450);
+  }
+
+  function commitHistoryPlayback(timeMs: number) {
+    if (historyPlaybackCommitTimer && browser) {
+      window.clearTimeout(historyPlaybackCommitTimer);
+      historyPlaybackCommitTimer = null;
+    }
+    playbackHistoryTimeMs = timeMs;
+  }
+
+  async function centerHistoryTimelineTime(timeMs: number) {
+    await tick();
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const targetTop = historyTimelinePaddingPx + historyTimelineYForTime(timeMs) - historyTimelineElement.clientHeight / 2;
+    historyTimelineElement.scrollTo({
+      top: Math.max(0, targetTop),
+      behavior: 'smooth'
+    });
+  }
+
+  function handleHistoryTimelineScroll() {
+    if (historyScrollFrame !== null || !browser) {
+      return;
+    }
+
+    historyScrollFrame = window.requestAnimationFrame(() => {
+      historyScrollFrame = null;
+      updateHistoryPlayheadFromScroll();
+    });
+  }
+
+  function updateHistoryPlayheadFromScroll() {
+    if (!historyTimelineElement) {
+      return;
+    }
+
+    const playheadContentY = historyTimelineElement.scrollTop + historyTimelineElement.clientHeight / 2 - historyTimelinePaddingPx;
+    const timeMs = historyTimelineTimeForY(playheadContentY);
+    if (Number.isFinite(timeMs) && selectedHistoryTimeMs !== timeMs) {
+      selectedHistoryTimeMs = timeMs;
+    }
+
+    const nearestEvent = nearestHistoryGroupForTime(timeMs)?.events[0] ?? null;
+    selectedReviewEventId = nearestEvent?.id ?? null;
+    if (nearestEvent) {
+      selectedHistoryCameraId = nearestEvent.cameraId;
+    }
+    scheduleHistoryPlaybackCommit(timeMs);
+  }
+
+  function handleHistoryTimelineClick(event: MouseEvent) {
+    if (!(event.currentTarget instanceof HTMLElement)) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const contentY = event.clientY - rect.top;
+    selectTimelineTime(historyTimelineTimeForY(contentY));
+  }
+
+  function emptyHistoryTimeline(): HistoryTimeline {
+    const now = Date.now();
+    return {
+      startMs: now - historyTimelineMinimumDurationMs,
+      endMs: now,
+      heightPx: historyTimelineHeight(historyTimelineMinimumDurationMs),
+      groups: [],
+      ticks: []
+    };
+  }
+
+  function buildHistoryTimeline(events: ReviewableSecurityEvent[]): HistoryTimeline {
+    const sortedEvents = [...events].sort(
+      (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
+    );
+
+    if (sortedEvents.length === 0) {
+      return emptyHistoryTimeline();
+    }
+
+    const latestMs = sortedEvents[0].occurredAtMs;
+    const earliestMs = sortedEvents.at(-1)?.occurredAtMs ?? latestMs;
+    const endMs = latestMs + 5 * 60 * 1000;
+    const startMs = Math.min(earliestMs - 5 * 60 * 1000, endMs - historyTimelineMinimumDurationMs);
+    const heightPx = historyTimelineHeight(endMs - startMs);
+    const groupsByBucket = new Map<number, ReviewableSecurityEvent[]>();
+
+    for (const event of sortedEvents) {
+      const bucket = Math.floor(event.occurredAtMs / historyTimelineBucketMs);
+      groupsByBucket.set(bucket, [...(groupsByBucket.get(bucket) ?? []), event]);
+    }
+
+    const groups = Array.from(groupsByBucket.entries())
+      .map(([bucket, groupEvents]) => {
+        const groupStartMs = Math.min(...groupEvents.map((event) => event.occurredAtMs));
+        const groupEndMs = Math.max(...groupEvents.map((event) => event.occurredAtMs));
+        return {
+          id: `group-${bucket}`,
+          startMs: groupStartMs,
+          endMs: groupEndMs,
+          timeMs: groupEndMs,
+          events: groupEvents.sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id))
+        };
+      })
+      .sort((left, right) => right.timeMs - left.timeMs || left.id.localeCompare(right.id));
+
+    return {
+      startMs,
+      endMs,
+      heightPx,
+      groups,
+      ticks: historyTimelineTicks(startMs, endMs)
+    };
+  }
+
+  function historyTimelineHeight(durationMs: number) {
+    return Math.max(360, Math.ceil((durationMs / 60000) * historyTimelinePixelsPerMinute));
+  }
+
+  function historyTimelineYForTime(timeMs: number) {
+    const clampedTimeMs = Math.min(historyTimeline.endMs, Math.max(historyTimeline.startMs, timeMs));
+    return ((historyTimeline.endMs - clampedTimeMs) / 60000) * historyTimelinePixelsPerMinute;
+  }
+
+  function historyTimelineTimeForY(y: number) {
+    const clampedY = Math.min(historyTimeline.heightPx, Math.max(0, y));
+    return Math.round(historyTimeline.endMs - (clampedY / historyTimelinePixelsPerMinute) * 60000);
+  }
+
+  function historyTimelineGroupStyle(group: HistoryTimelineGroup) {
+    const top = historyTimelineYForTime(group.timeMs);
+    const durationHeight = (Math.max(historyTimelineBucketMs, group.endMs - group.startMs) / 60000) * historyTimelinePixelsPerMinute;
+    const height = Math.max(72, Math.min(132, durationHeight));
+    return `top: ${top}px; min-height: ${height}px;`;
+  }
+
+  function historyTimelineTickStyle(tick: HistoryTimelineTick) {
+    return `top: ${historyTimelineYForTime(tick.timeMs)}px;`;
+  }
+
+  function historyTimelineTicks(startMs: number, endMs: number): HistoryTimelineTick[] {
+    const durationMs = endMs - startMs;
+    const stepMs =
+      durationMs > 24 * 60 * 60 * 1000
+        ? 24 * 60 * 60 * 1000
+        : durationMs > 3 * 60 * 60 * 1000
+          ? 60 * 60 * 1000
+          : 15 * 60 * 1000;
+    const firstTickMs = Math.ceil(startMs / stepMs) * stepMs;
+    const ticks: HistoryTimelineTick[] = [];
+
+    for (let timeMs = firstTickMs; timeMs <= endMs; timeMs += stepMs) {
+      ticks.push({
+        id: `tick-${timeMs}`,
+        timeMs,
+        label: stepMs >= 24 * 60 * 60 * 1000 ? formatDate(timeMs) : formatTimelineTime(timeMs)
+      });
+    }
+
+    return ticks;
+  }
+
+  function nearestHistoryGroupForTime(timeMs: number) {
+    const thresholdMs = historyTimelineBucketMs / 2;
+    let nearest: HistoryTimelineGroup | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (const group of historyTimeline.groups) {
+      const distance =
+        timeMs >= group.startMs && timeMs <= group.endMs
+          ? 0
+          : Math.min(Math.abs(timeMs - group.startMs), Math.abs(timeMs - group.endMs));
+      if (distance < nearestDistance) {
+        nearest = group;
+        nearestDistance = distance;
+      }
+    }
+
+    return nearestDistance <= thresholdMs ? nearest : null;
+  }
+
+  function historyGroupLabel(group: HistoryTimelineGroup) {
+    const counts = new Map<string, number>();
+    for (const event of group.events) {
+      counts.set(event.label, (counts.get(event.label) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
+      .join(', ');
+  }
+
+  function historyGroupQualityLabel(group: HistoryTimelineGroup) {
+    if (group.events.some((event) => event.preferredSegment?.role === 'main')) {
+      return 'full quality';
+    }
+    if (group.events.some((event) => event.preferredSegment?.role === 'sub')) {
+      return 'substream';
+    }
+    return 'no recording';
+  }
+
+  function historyGroupThumbnailUrl(group: HistoryTimelineGroup) {
+    for (const event of group.events) {
+      const thumbnailUrl = historyEventThumbnailUrl(event);
+      if (thumbnailUrl) {
+        return thumbnailUrl;
+      }
+    }
+
+    return null;
+  }
+
+  function historyEventThumbnailUrl(event: ReviewableSecurityEvent) {
+    const segment = event.preferredSegment;
+    if (!segment) {
+      return null;
+    }
+
+    const params = new URLSearchParams({
+      path: segment.relativePath,
+      t: String(Math.max(0, Math.floor((event.occurredAtMs - segment.startMs) / 1000)))
+    });
+    return `/api/recordings/thumbnail?${params.toString()}`;
+  }
+
+  function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
+    const cameraId = selectedHistoryCameraId ?? selectedReviewEvent?.cameraId ?? configuredCameras[0]?.id ?? null;
+    const candidates = segments.filter(
+      (segment) => (!cameraId || segment.cameraId === cameraId) && timeMs >= segment.startMs && timeMs <= segment.endMs
+    );
+
+    return candidates.find((segment) => segment.role === 'main') ?? candidates.find((segment) => segment.role === 'sub') ?? null;
+  }
+
+  function recordingSourceForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return null;
+    }
+
+    const params = new URLSearchParams({ path: segment.relativePath });
+    const offsetSeconds = Math.max(0, Math.floor((timeMs - segment.startMs) / 1000));
+    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
+  }
+
+  function recordingQualityLabelForTime(segments: RecordingSegment[], timeMs: number) {
+    const segment = recordingSegmentForTime(segments, timeMs);
+    if (!segment) {
+      return 'no recording';
+    }
+
+    return segment.role === 'main' ? 'full quality' : 'substream';
   }
 
   function recordingSource(event: ReviewableSecurityEvent) {
@@ -577,6 +977,24 @@
     }
 
     return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
+  }
+
+  function formatTimelineTime(tsMs: number) {
+    return new Date(tsMs).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function formatDate(tsMs: number) {
+    return new Date(tsMs).toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric'
+    });
+  }
+
+  function formatTimelineRange(startMs: number, endMs: number) {
+    return `${formatTimelineTime(startMs)} - ${formatTimelineTime(endMs)}`;
   }
 
   async function saveCredentials(camera: DiscoveredCamera, event: SubmitEvent) {
@@ -723,17 +1141,41 @@
           </div>
         </div>
 
-        {#if selectedReviewEvent}
-          {@const selectedEvent = selectedReviewEvent}
+        {#if discoveryState.recordings.events.length > 0}
+          {#if configuredCameras.length > 1}
+            <div class="history-camera-selector" aria-label="History camera">
+              {#each configuredCameras as camera}
+                <button
+                  type="button"
+                  class:active={camera.id === selectedHistoryCameraId}
+                  onclick={() => selectHistoryCamera(camera.id)}
+                >
+                  <strong>{displayName(camera)}</strong>
+                  <span>{historyCameraEventCount(camera.id)} events</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <div class="history-workspace">
             <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
               <div class="recording-player-header">
                 <div>
-                  <h3>{selectedEvent.label}</h3>
-                  <p>
-                    {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                    · {formatDateTime(selectedEvent.occurredAtMs)}
-                    · {selectedRecordingQuality}
-                  </p>
+                  {#if selectedReviewEvent}
+                    {@const selectedEvent = selectedReviewEvent}
+                    <h3>{selectedEvent.label}</h3>
+                    <p>
+                      {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedEvent.occurredAtMs)}
+                      · {selectedRecordingQuality}
+                    </p>
+                  {:else if selectedHistoryTimeMs !== null}
+                    <h3>Timeline position</h3>
+                    <p>
+                      {selectedHistoryCamera()?.name ?? selectedHistoryCamera()?.remoteAddress ?? 'Unknown camera'}
+                      · {formatDateTime(selectedHistoryTimeMs)}
+                      · {selectedRecordingQuality}
+                    </p>
+                  {/if}
                 </div>
               </div>
               {#if selectedRecordingSource}
@@ -749,35 +1191,80 @@
                 {/key}
               {:else}
                 <p class="notice compact">
-                  No retained recording segment currently overlaps this event.
+                  No retained recording segment currently overlaps the playhead.
                 </p>
               {/if}
             </section>
-        {/if}
 
-        {#if discoveryState.recordings.events.length > 0}
-          <ol class="history-list" aria-label="Observed security events">
-            {#each discoveryState.recordings.events as event}
-              <li data-testid="history-event-row">
-                <button
-                  type="button"
-                  class="history-event"
-                  class:active={event.id === selectedReviewEventId}
-                  disabled={!event.preferredSegment}
-                  onclick={() => selectReviewEvent(event)}
+            <section class="history-timeline-panel" aria-label="Video history timeline">
+              <div class="history-timeline-header">
+                <div>
+                  <h3>Timeline</h3>
+                  <p>Scroll the timeline under the fixed playhead to scrub video.</p>
+                </div>
+                {#if selectedHistoryTimeMs !== null}
+                  <strong>{formatDateTime(selectedHistoryTimeMs)}</strong>
+                {/if}
+              </div>
+
+              <div
+                class="history-timeline"
+                bind:this={historyTimelineElement}
+                onscroll={handleHistoryTimelineScroll}
+                data-testid="history-timeline"
+              >
+                <div class="history-playhead" aria-hidden="true">
+                  <span></span>
+                </div>
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+                <div
+                  class="history-timeline-content"
+                  style={`height: ${historyTimeline.heightPx}px;`}
+                  role="presentation"
+                  onclick={handleHistoryTimelineClick}
                 >
-                  <span>
-                    <strong>{event.label}</strong>
-                    <small>
-                      {cameraById(event.cameraId)?.name ?? cameraById(event.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                      · {formatDateTime(event.occurredAtMs)}
-                    </small>
-                  </span>
-                  <span>{recordingQualityLabel(event)}</span>
-                </button>
-              </li>
-            {/each}
-          </ol>
+                  {#each historyTimeline.ticks as tick}
+                    <div class="history-time-tick" style={historyTimelineTickStyle(tick)} aria-hidden="true">
+                      <span>{tick.label}</span>
+                    </div>
+                  {/each}
+                  {#each historyTimeline.groups as group}
+                    {@const groupThumbnailUrl = historyGroupThumbnailUrl(group)}
+                    <button
+                      type="button"
+                      class="history-event-group"
+                      class:active={group.events.some((event) => event.id === selectedReviewEventId)}
+                      style={historyTimelineGroupStyle(group)}
+                      data-testid="history-event-row"
+                      data-history-group-id={group.id}
+                      data-history-time-ms={group.timeMs}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        selectTimelineGroup(group);
+                      }}
+                    >
+                      <span class="history-event-thumb" aria-hidden="true">
+                        {#if groupThumbnailUrl}
+                          <img src={groupThumbnailUrl} alt="" loading="lazy" />
+                        {:else}
+                          {historyGroupLabel(group).slice(0, 1)}
+                        {/if}
+                      </span>
+                      <span class="history-event-body">
+                        <strong>{historyGroupLabel(group)}</strong>
+                        <small>
+                          {cameraById(group.events[0].cameraId)?.name ?? cameraById(group.events[0].cameraId)?.remoteAddress ?? 'Unknown camera'}
+                          · {formatTimelineRange(group.startMs, group.endMs)}
+                        </small>
+                      </span>
+                      <span class="history-quality">{historyGroupQualityLabel(group)}</span>
+                    </button>
+                  {/each}
+                </div>
+                <div class="history-timeline-padding" aria-hidden="true"></div>
+              </div>
+            </section>
+          </div>
         {:else}
           <p class="notice">No vehicle, person, or motion events have been observed yet.</p>
         {/if}
@@ -1380,8 +1867,7 @@
 
   .camera-grid,
   .settings-list,
-  .health-list,
-  .history-list {
+  .health-list {
     display: grid;
     gap: 12px;
     margin: 0;
@@ -1447,7 +1933,6 @@
   }
 
   .storage-summary span,
-  .history-event small,
   .recording-player p {
     color: #66727f;
   }
@@ -1460,6 +1945,35 @@
 
   .storage-summary strong {
     font-size: 1rem;
+  }
+
+  .history-camera-selector {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .history-camera-selector button {
+    display: grid;
+    gap: 2px;
+    justify-items: start;
+    border-color: #d9dde2;
+    background: #ffffff;
+    color: #171a1f;
+    padding: 10px 12px;
+    text-align: left;
+  }
+
+  .history-camera-selector button.active {
+    border-color: #1f4f82;
+    background: #f2f7fc;
+  }
+
+  .history-camera-selector span {
+    color: #66727f;
+    font-size: 0.82rem;
+    font-weight: 700;
   }
 
   .recording-player {
@@ -1488,43 +2002,193 @@
     background: #111827;
   }
 
-  .history-list li {
-    margin: 0;
+  .history-workspace {
+    display: grid;
+    gap: 12px;
   }
 
-  .history-event {
+  .history-timeline-panel {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .history-timeline-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
-    width: 100%;
-    border-color: #d9dde2;
-    background: #ffffff;
+  }
+
+  .history-timeline-header h3,
+  .history-timeline-header p {
+    margin-bottom: 0;
+  }
+
+  .history-timeline-header p {
+    color: #66727f;
+  }
+
+  .history-timeline-header strong {
+    color: #1f4f82;
+    font-size: 0.86rem;
+    white-space: nowrap;
+  }
+
+  .history-timeline {
+    position: relative;
+    max-height: min(58vh, 640px);
+    min-height: 360px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background:
+      linear-gradient(90deg, #f6f8fa 0 72px, transparent 72px),
+      #ffffff;
+  }
+
+  .history-timeline-padding {
+    height: 168px;
+  }
+
+  .history-timeline-content {
+    position: relative;
+    min-height: 360px;
+    cursor: crosshair;
+  }
+
+  .history-timeline-content::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 71px;
+    width: 1px;
+    background: #d9dde2;
+    content: '';
+  }
+
+  .history-playhead {
+    position: sticky;
+    top: 50%;
+    z-index: 5;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .history-playhead span {
+    position: absolute;
+    right: 0;
+    left: 0;
+    display: block;
+    border-top: 2px solid #c82232;
+    box-shadow: 0 0 0 1px rgba(200, 34, 50, 0.12);
+  }
+
+  .history-playhead span::before {
+    position: absolute;
+    top: -7px;
+    left: 58px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: #c82232;
+    content: '';
+  }
+
+  .history-time-tick {
+    position: absolute;
+    right: 0;
+    left: 0;
+    border-top: 1px solid #edf0f3;
+    pointer-events: none;
+  }
+
+  .history-time-tick span {
+    position: absolute;
+    top: -0.62rem;
+    left: 0;
+    width: 62px;
+    color: #66727f;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-align: right;
+  }
+
+  .history-event-group {
+    position: absolute;
+    right: 10px;
+    left: 82px;
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 4px 14px rgba(23, 26, 31, 0.08);
     color: #171a1f;
-    padding: 12px;
+    padding: 10px;
     text-align: left;
   }
 
-  .history-event:disabled {
-    cursor: default;
-  }
-
-  .history-event.active {
-    border-color: #1f4f82;
+  .history-event-group.active {
+    border-color: #bad3ea;
     background: #f2f7fc;
   }
 
-  .history-event > span:first-child {
+  .history-event-thumb {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    overflow: hidden;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    background: #eef2f5;
+    color: #1f4f82;
+    font-weight: 900;
+  }
+
+  .history-event-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .history-event-body {
     display: grid;
     gap: 3px;
     min-width: 0;
   }
 
-  .history-event > span:last-child {
+  .history-event-body small {
+    color: #66727f;
+  }
+
+  .history-quality {
+    grid-column: 2;
     color: #3d4752;
-    font-size: 0.82rem;
-    font-weight: 700;
-    white-space: nowrap;
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
+  @media (orientation: landscape) and (min-width: 760px) {
+    .history-workspace {
+      grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+      align-items: start;
+    }
+
+    .recording-player {
+      position: sticky;
+      top: 16px;
+      margin-bottom: 0;
+    }
+
+    .history-timeline {
+      max-height: min(72vh, 760px);
+    }
   }
 
   .empty-state {
