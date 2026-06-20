@@ -61,7 +61,18 @@ function isCameraStateSnapshot(value: unknown): value is CameraStateSnapshot {
   return (
     Boolean(candidate.state) &&
     typeof candidate.cachedAtMs === 'number' &&
-    (candidate.cursor === null || isPatrolEventCursor(candidate.cursor))
+    (candidate.cursor === null || isPatrolEventCursor(candidate.cursor)) &&
+    hasPersonRecognitionState(candidate.state)
+  );
+}
+
+function hasPersonRecognitionState(value: unknown) {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      'people' in value &&
+      (value as { people?: unknown }).people
   );
 }
 

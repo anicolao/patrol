@@ -80,3 +80,32 @@ separate recordings root on the NVR volume:
 PATROL_DATA_DIR=/Volumes/NVR/patrol
 PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings
 ```
+
+The Nix wrappers load `.env.local` from the repository root before starting
+Patrol processes.
+
+## Moving Existing Data
+
+After the target volume is mounted, move existing Patrol data and leave a
+compatibility symlink from `.patrol`:
+
+```sh
+nix develop --command patrol-migrate-data
+```
+
+This copies `.patrol` to `PATROL_DATA_DIR`, renames the old directory to
+`.patrol.before-volume-migration`, and links `.patrol` to the new data root.
+Stop long-running Patrol services before running it so no process writes to the
+old directory during the copy.
+
+If only existing recording segments need to move, use:
+
+```sh
+nix develop --command patrol-migrate-recordings
+```
+
+The Mac mini deployment has already moved recordings to:
+
+```text
+/Volumes/NVR/recordings
+```

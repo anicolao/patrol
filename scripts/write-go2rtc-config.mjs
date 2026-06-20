@@ -8,6 +8,7 @@ const secretsDir = path.join(dataRoot, 'secrets');
 const go2rtcDir = path.join(dataRoot, 'go2rtc');
 const go2rtcApiBaseUrl = process.env.PATROL_GO2RTC_API_BASE_URL ?? 'http://127.0.0.1:1984';
 const go2rtcApiListen = process.env.PATROL_GO2RTC_API_LISTEN ?? '0.0.0.0:1984';
+const go2rtcApiOrigin = process.env.PATROL_GO2RTC_API_ORIGIN ?? '*';
 const go2rtcRtspListen = process.env.PATROL_GO2RTC_RTSP_LISTEN ?? '127.0.0.1:8554';
 const go2rtcWebrtcListen = process.env.PATROL_GO2RTC_WEBRTC_LISTEN ?? ':8555';
 
@@ -116,6 +117,7 @@ function renderConfig(cameras, secrets) {
   return [
     'api:',
     `  listen: ${yamlString(go2rtcApiListen)}`,
+    `  origin: ${yamlString(go2rtcApiOrigin)}`,
     'rtsp:',
     `  listen: ${yamlString(go2rtcRtspListen)}`,
     'webrtc:',

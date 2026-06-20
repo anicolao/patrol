@@ -1,4 +1,7 @@
 node_modules/
+.env.local
+.patrol
+.patrol.before-volume-migration*
 .svelte-kit/
 build/
 .vite/

@@ -91,9 +91,15 @@ the main and sub streams continuously from go2rtc, keeps full-quality segments
 for 7 days, keeps substream segments for 30 days, and exposes Annke alert
 events in the History tab for direct playback.
 
+Use `PERSON_RECOGNITION_SETUP.md` for the person recognition worker. It uses
+Annke person alerts to extract high-resolution crops from retained main-stream
+recordings, computes Apple Vision feature prints locally on macOS, and lets the
+UI label unknown samples through append-only events.
+
 ## Repository Status
 
 This repository now contains the early Patrol implementation: camera discovery,
 go2rtc stream materialization, Annke event observation, live event streaming,
-historical recording, and system health monitoring. `MVP_DESIGN.md` remains
-the implementation guide for the next pieces of the pipeline.
+historical recording, person recognition, and system health monitoring.
+`MVP_DESIGN.md` remains the implementation guide for the next pieces of the
+pipeline.

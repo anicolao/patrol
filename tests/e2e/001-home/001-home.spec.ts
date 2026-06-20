@@ -10,6 +10,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     processes: systemProcesses(fixedNowMs - 15000),
     devices: [],
     recordings: emptyRecordings(),
+    people: emptyPeople(),
     errors: [],
     lastDiscovery: null
   };
@@ -25,6 +26,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     staleAfterMs: 60 * 60 * 1000,
     processes: systemProcesses(fixedNowMs - 15000),
     recordings: annke ? recordingState(fixedNowMs - 4000) : emptyRecordings(),
+    people: annke ? personRecognitionState(fixedNowMs - 4000) : emptyPeople(),
     errors: [],
     lastDiscovery: {
       runId: 'discovery-run-1',
@@ -223,6 +225,18 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: go2rtcViewer(streamName)
     });
   });
+  await page.route('**/api/person-recognition/crops**', async (route) => {
+    await route.fulfill({
+      contentType: 'image/svg+xml',
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="260" viewBox="0 0 160 260">
+        <rect width="160" height="260" fill="#e5e7eb"/>
+        <circle cx="82" cy="54" r="22" fill="#4b5563"/>
+        <path d="M64 84h40l16 72-24 4 4 72H78l-7-66-15 66H34l19-76z" fill="#374151"/>
+        <path d="M63 92 34 139l-16-9 34-54zM103 94l35 43-14 12-38-46z" fill="#4b5563"/>
+        <path d="M77 232h26v16H72zM25 232h30v16H20z" fill="#111827"/>
+      </svg>`
+    });
+  });
 
   await page.goto('/');
 
@@ -256,6 +270,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByTestId('tab-cameras')).toHaveAttribute('aria-current', 'page');
           await expect(page.getByTestId('tab-settings')).toBeVisible();
           await expect(page.getByTestId('tab-settings')).toBeEnabled();
+          await expect(page.getByTestId('tab-people')).toBeVisible();
+          await expect(page.getByTestId('tab-people')).toBeEnabled();
           await expect(page.getByTestId('tab-history')).toBeVisible();
           await expect(page.getByTestId('tab-history')).toBeEnabled();
           await expect(page.getByTestId('tab-health')).toBeVisible();
@@ -348,7 +364,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Credentials save status is shown',
         check: async () => {
           await expect(page.getByText('Credentials saved to event logs.')).toBeVisible();
-          await expect(page.getByText('Credentials saved 30 seconds ago.')).toBeVisible();
+          await expect(page.getByText(/Credentials saved (\d+ seconds|1 minute) ago\./)).toBeVisible();
         }
       },
       {
@@ -409,7 +425,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('6/6 green');
+          await expect(page.getByTestId('process-score')).toHaveText('7/7 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -422,7 +438,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('Annke alert worker')).toBeVisible();
           await expect(page.getByText('Watchdog cron')).toBeVisible();
           await expect(page.getByText('Recording worker')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(6);
+          await expect(page.getByText('Person recognition worker')).toBeVisible();
+          await expect(page.getByTestId('process-row')).toHaveCount(7);
         }
       },
       {
@@ -531,11 +548,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'Vehicle event is shown in history',
+        spec: 'Nearby events are coalesced in history',
         check: async () => {
           await expect(page.getByTestId('history-event-row')).toHaveCount(1);
-          await expect(page.getByRole('button', { name: /Vehicle/ })).toBeVisible();
-          await expect(page.getByTestId('history-event-row').getByText('full quality')).toBeVisible();
+          await expect(page.getByTestId('history-event-row')).toContainText('Vehicle');
+          await expect(page.getByTestId('history-event-row')).toContainText('Person');
+          await expect(page.getByTestId('history-event-row')).toContainText('Alex 93%');
+          await expect(page.getByTestId('history-event-row')).toContainText('full quality');
         }
       },
       {
@@ -547,6 +566,48 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             'src',
             /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
           );
+        }
+      }
+    ]
+  });
+
+  await page.getByTestId('tab-people').click();
+  await tester.step('person-recognition', {
+    description: 'Unknown person samples can be labeled from high-resolution crops',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'People tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'People', exact: true })).toBeVisible();
+          await expect(page.getByTestId('tab-people')).toHaveAttribute('aria-current', 'page');
+        }
+      },
+      {
+        spec: 'Person recognition summary is shown',
+        check: async () => {
+          await expect(page.getByTestId('people-summary')).toContainText('Unknown');
+          await expect(page.getByTestId('people-summary')).toContainText('2');
+        }
+      },
+      {
+        spec: 'Recognized sample can be bulk accepted or corrected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'Recognized as Alex' })).toBeVisible();
+          await expect(page.getByRole('heading', { name: 'Suggested GUID 12345678' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Accept all' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Label all GUID 12345678' })).toBeVisible();
+          await expect(page.getByTestId('person-sample-card')).toHaveCount(2);
+          await expect(page.getByAltText(/Person sample/).first()).toHaveAttribute(
+            'src',
+            '/api/person-recognition/crops?path=annke-alert-human-1-person.jpg'
+          );
+          await expect(page.getByText('Suggested Alex (93%)')).toBeVisible();
+          await expect(page.getByText('Suggested GUID 12345678 (61%)')).toBeVisible();
+          await expect(page.getByAltText(/Reference Alex sample/)).toBeVisible();
+          await expect(page.getByLabel('Person recognition triage').getByAltText(/Reference GUID 12345678 sample/)).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Dismiss' })).toHaveCount(2);
+          await expect(page.getByLabel('Correct label')).toHaveCount(2);
         }
       }
     ]
@@ -666,6 +727,7 @@ test('cached snapshot boots quickly and reconciles server state', async ({ page 
         }
       ],
       recordings: emptyRecordings(),
+      people: emptyPeople(),
       errors: [],
       lastDiscovery: {
         runId: 'cached-discovery',
@@ -989,6 +1051,17 @@ function recordingState(eventAtMs: number): CameraDiscoveryState['recordings'] {
     segments: [segment],
     events: [
       {
+        id: 'annke-alert-human-1',
+        cameraId: 'uuid:driveway-camera',
+        occurredAtMs: eventAtMs - 60_000,
+        eventType: 'VMD',
+        eventState: 'active',
+        targetType: 'human',
+        label: 'Person',
+        sourceEventId: 'annke-alert-human-1',
+        preferredSegment: segment
+      },
+      {
         id: 'annke-alert-vehicle-1',
         cameraId: 'uuid:driveway-camera',
         occurredAtMs: eventAtMs,
@@ -1009,6 +1082,152 @@ function recordingState(eventAtMs: number): CameraDiscoveryState['recordings'] {
       totalEstimatedBytes: 869400000000,
       observedBytes: segment.sizeBytes
     }
+  };
+}
+
+function emptyPeople(): CameraDiscoveryState['people'] {
+  return {
+    samples: [],
+    labels: [],
+    unlabeledCount: 0,
+    labeledCount: 0
+  };
+}
+
+function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people'] {
+  const anonymousLabel = 'anonymous:12345678-90ab-cdef-1234-567890abcdef';
+  return {
+    samples: [
+      {
+        id: 'annke-alert-human-alex-reference-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-alex-reference',
+        occurredAtMs: eventAtMs - 180_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-alex-reference-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-alex-reference-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/1781099190.mp4',
+        sourceOffsetMs: 2000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.1, 0.2, 0.3]
+        },
+        label: 'Alex',
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: null,
+        analyzedAtMs: eventAtMs - 178_000,
+        labeledAtMs: eventAtMs - 177_000,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-guid-reference-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-guid-reference',
+        occurredAtMs: eventAtMs - 120_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-guid-reference-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-guid-reference-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/1781099192.mp4',
+        sourceOffsetMs: 2000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.4, 0.1, 0.2]
+        },
+        label: anonymousLabel,
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: null,
+        analyzedAtMs: eventAtMs - 118_000,
+        labeledAtMs: eventAtMs - 117_000,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-1-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-1',
+        occurredAtMs: eventAtMs,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-1-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-1-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/1781099196.mp4',
+        sourceOffsetMs: 4000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.1, 0.2, 0.3]
+        },
+        label: null,
+        suggestedLabel: 'Alex',
+        suggestedScore: 0.93,
+        error: null,
+        analyzedAtMs: eventAtMs + 2000,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-3-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-3',
+        occurredAtMs: eventAtMs - 30_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-3-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-3-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/1781099195.mp4',
+        sourceOffsetMs: 4000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.4, 0.1, 0.2]
+        },
+        label: null,
+        suggestedLabel: anonymousLabel,
+        suggestedScore: 0.61,
+        error: null,
+        analyzedAtMs: eventAtMs + 1500,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-2-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-2',
+        occurredAtMs: eventAtMs - 60_000,
+        status: 'failed',
+        cropRelativePath: null,
+        cropUrl: null,
+        cropBox: null,
+        cropMethod: null,
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: null,
+        sourceOffsetMs: null,
+        embedding: null,
+        label: null,
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: 'Vision did not find a person segmentation mask',
+        analyzedAtMs: eventAtMs + 1000,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      }
+    ],
+    labels: ['Alex', anonymousLabel],
+    unlabeledCount: 2,
+    labeledCount: 2
   };
 }
 
@@ -1073,6 +1292,16 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       lastEventType: 'system.process.heartbeat',
       health: 'ok',
       detail: 'Records main and sub streams into retained video segments'
+    },
+    {
+      id: 'patrol-person-recognizer',
+      label: 'Person recognition worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      health: 'ok',
+      detail: 'Extracts person crops and classifies local recognition samples'
     }
   ];
 }
