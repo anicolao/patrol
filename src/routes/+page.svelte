@@ -25,6 +25,7 @@
   };
 
   const liveEventPort = '5186';
+  const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
 
   let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
@@ -70,6 +71,10 @@
       const loadedCachedState = await loadCachedDiscoveryState();
       if (!loadedCachedState) {
         await loadDiscoveryState();
+      } else if (cachedSnapshotNeedsImmediateRefresh(cameraSnapshot)) {
+        await loadDiscoveryState(true);
+      } else {
+        void loadDiscoveryState(true);
       }
       if (!stopped) {
         stopEventSocket = connectEventSocket();
@@ -346,6 +351,19 @@
     }
 
     return false;
+  }
+
+  function cachedSnapshotNeedsImmediateRefresh(snapshot: CameraStateSnapshot | null) {
+    if (!snapshot) {
+      return true;
+    }
+
+    const configuredCameraCount = snapshot.state.devices.filter((camera) => camera.credentials).length;
+    if (configuredCameraCount === 0) {
+      return true;
+    }
+
+    return Date.now() - snapshot.cachedAtMs > cachedSnapshotReconcileAfterMs;
   }
 
   function persistCameraSnapshot(snapshot: CameraStateSnapshot) {

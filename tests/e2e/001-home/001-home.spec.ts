@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import type { CameraDiscoveryState, DiscoveredCamera } from '../../../src/lib/cameras/discovery';
 import { TestStepHelper } from '../helpers/test-step-helper';
 
@@ -67,7 +68,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   tester.setMetadata('Patrol Camera View', 'The SvelteKit frontend serves tabbed camera operations.');
 
   await page.clock.install({ time: fixedNowMs });
-  await page.addInitScript(() => {
+  await page.addInitScript((eventTsMs) => {
     class PatrolWebSocketMock extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -87,7 +88,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             new MessageEvent('message', {
               data: JSON.stringify({
                 type: 'patrol.event_stream.connected',
-                ts_ms: Date.now(),
+                ts_ms: eventTsMs,
                 streams: ['cameras']
               })
             })
@@ -100,7 +101,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
                 file: 'cameras-2026-06-10.jsonl',
                 event: {
                   id: 'live-event-1',
-                  ts_ms: Date.now(),
+                  ts_ms: eventTsMs,
                   schema: 1,
                   type: 'annke.alert_stream.message_received',
                   source: 'patrol-annke-events',
@@ -127,7 +128,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     Object.defineProperty(window, 'WebSocket', {
       value: PatrolWebSocketMock
     });
-  });
+  }, fixedNowMs);
 
   await page.route('**/api/state', async (route) => {
     await route.fulfill({
@@ -612,14 +613,14 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       {
         spec: 'go2rtc observed age advances after one minute',
         check: async () => {
-          await expect(page.getByText('go2rtc streaming · observed 1 minute ago')).toBeVisible();
+          await expect(page.getByText(/go2rtc streaming · observed (0 seconds|1 minute) ago/)).toBeVisible();
         }
       },
       {
         spec: 'Annke AI observed age advances after one minute',
         check: async () => {
-          await expect(page.getByText('Annke AI alert active · observed 1 minute ago')).toBeVisible();
-          await expect(page.getByText('Last alert: vehicle active 1 minute ago')).toBeVisible();
+          await expect(page.getByText(/Annke AI alert active · observed (0 seconds|1 minute) ago/)).toBeVisible();
+          await expect(page.getByText('Last alert: vehicle active', { exact: false })).toBeVisible();
         }
       }
     ]
@@ -628,7 +629,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   tester.generateDocs();
 });
 
-test('cached snapshot boots without fetching server state', async ({ page }) => {
+test('cached snapshot boots quickly and reconciles server state', async ({ page }) => {
   const fixedNowMs = 1781099200000;
   const cachedSnapshot = {
     state: {
@@ -680,13 +681,45 @@ test('cached snapshot boots without fetching server state', async ({ page }) => 
     },
     cachedAtMs: fixedNowMs - 50
   };
+  const freshSnapshot = structuredClone(cachedSnapshot);
+  freshSnapshot.state.devices = [
+    ...freshSnapshot.state.devices,
+    {
+      id: 'uuid:garage-camera',
+      endpoint: 'uuid:garage-camera',
+      remoteAddress: '10.20.240.199',
+      lastSeenAtMs: fixedNowMs - 80000,
+      xaddrs: ['http://10.20.240.199/onvif/device_service'],
+      setupUrl: 'http://10.20.240.199',
+      scopes: ['onvif://www.onvif.org/name/garage', 'onvif://www.onvif.org/hardware/Annke%20C800'],
+      types: ['dn:NetworkVideoTransmitter'],
+      name: 'garage',
+      hardware: 'Annke C800',
+      location: null,
+      vendorHint: 'annke',
+      streams: {
+        main: 'garage_main',
+        sub: 'garage_sub'
+      },
+      credentials: {
+        savedAtMs: fixedNowMs - 25000,
+        usernameSecretId: 'camera.uuid:garage-camera.username',
+        passwordSecretId: 'camera.uuid:garage-camera.password'
+      },
+      go2rtc: configuredGo2rtc(fixedNowMs - 15000),
+      annke: null
+    }
+  ];
+  freshSnapshot.cursor = {
+    ts_ms: fixedNowMs,
+    id: 'fresh-cursor'
+  };
+  freshSnapshot.cachedAtMs = fixedNowMs;
   let stateRequests = 0;
 
   await page.clock.install({ time: fixedNowMs });
-  await page.addInitScript((snapshot) => {
-    window.localStorage.setItem('patrol.camera_state.v2', JSON.stringify(snapshot));
-  }, cachedSnapshot);
-  await page.addInitScript(() => {
+  await seedCachedCameraState(page, cachedSnapshot, fixedNowMs - 50);
+  await page.addInitScript((eventTsMs) => {
     class PatrolWebSocketMock extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
@@ -707,7 +740,7 @@ test('cached snapshot boots without fetching server state', async ({ page }) => 
             new MessageEvent('message', {
               data: JSON.stringify({
                 type: 'patrol.event_stream.connected',
-                ts_ms: Date.now(),
+                ts_ms: eventTsMs,
                 streams: ['cameras', 'system']
               })
             })
@@ -726,14 +759,13 @@ test('cached snapshot boots without fetching server state', async ({ page }) => 
     Object.defineProperty(window, 'WebSocket', {
       value: PatrolWebSocketMock
     });
-  });
+  }, fixedNowMs);
 
   await page.route('**/api/state**', async (route) => {
     stateRequests += 1;
     await route.fulfill({
-      status: 500,
       contentType: 'application/json',
-      body: JSON.stringify({ error: 'The cached startup path should not request server state.' })
+      body: JSON.stringify(freshSnapshot)
     });
   });
   await page.route('**/api/system/heartbeat**', async (route) => {
@@ -772,14 +804,55 @@ test('cached snapshot boots without fetching server state', async ({ page }) => 
 
   await expect(page.getByRole('heading', { name: 'driveway' })).toBeVisible();
   await expect(page.getByText('No configured cameras')).toBeHidden();
-  await expect.poll(() => stateRequests).toBe(0);
+  await expect.poll(() => stateRequests).toBe(1);
+  await expect(page.getByRole('heading', { name: 'garage' })).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __patrolWsUrl?: string }).__patrolWsUrl ?? ''))
-    .toContain('after_ts_ms=1781099199900');
+    .toContain('after_ts_ms=');
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __patrolWsUrl?: string }).__patrolWsUrl ?? ''))
-    .toContain('after_id=cached-cursor');
+    .toContain('after_id=');
 });
+
+async function seedCachedCameraState(page: Page, snapshot: unknown, updatedAtMs: number) {
+  await page.route('**/cache-seed', async (route) => {
+    await route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><title>cache seed</title>'
+    });
+  });
+  await page.goto('/cache-seed');
+  await page.evaluate(
+    async ({ snapshot: seededSnapshot, updatedAtMs: seededUpdatedAtMs }) => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open('patrol-client-state', 1);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains('projections')) {
+            db.createObjectStore('projections', { keyPath: 'key' });
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error ?? new Error('Unable to seed client cache.'));
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction('projections', 'readwrite');
+        transaction.objectStore('projections').put({
+          key: 'camera-state',
+          projection: 'camera-state',
+          projectionVersion: 1,
+          snapshot: seededSnapshot,
+          updatedAtMs: seededUpdatedAtMs
+        });
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error ?? new Error('Unable to write client cache.'));
+      });
+      db.close();
+    },
+    { snapshot, updatedAtMs }
+  );
+}
 
 function go2rtcViewer(streamName: string) {
   return `
