@@ -15,11 +15,12 @@ const streams = (process.env.PATROL_EVENTS_WS_STREAMS ?? 'cameras,system')
   .map((stream) => stream.trim())
   .filter(Boolean);
 
+const eventIndex = [];
 const offsets = new Map();
 const partialLines = new Map();
 
 await mkdir(eventsDir, { recursive: true, mode: 0o700 });
-await initializeOffsets();
+await initializeEventIndex();
 startProcessHeartbeats({
   processId: 'patrol-events-ws',
   label: 'Event WebSocket server',
@@ -76,12 +77,13 @@ httpServer.listen(port, host, () => {
   console.log(`tailing ${eventsDir} for streams: ${streams.join(', ')}`);
 });
 
-async function initializeOffsets() {
+async function initializeEventIndex() {
   for (const file of await listEventFiles()) {
     const filePath = path.join(eventsDir, file);
     const fileStat = await stat(filePath);
+    const indexedEvents = await indexEventFile(file, 0, fileStat.size, emptyPartialLine());
     offsets.set(filePath, fileStat.size);
-    partialLines.set(filePath, '');
+    partialLines.set(filePath, indexedEvents.partialLine);
   }
 }
 
@@ -92,8 +94,9 @@ async function pollEventFiles() {
     const previousOffset = offsets.get(filePath) ?? 0;
 
     if (fileStat.size < previousOffset) {
+      removeIndexedEventsForFile(filePath);
       offsets.set(filePath, 0);
-      partialLines.set(filePath, '');
+      partialLines.set(filePath, emptyPartialLine());
     }
 
     const offset = offsets.get(filePath) ?? 0;
@@ -101,35 +104,23 @@ async function pollEventFiles() {
       continue;
     }
 
-    const chunk = await readRange(filePath, offset, fileStat.size);
+    const indexedEvents = await indexEventFile(
+      file,
+      offset,
+      fileStat.size,
+      partialLines.get(filePath) ?? emptyPartialLine(),
+      true
+    );
     offsets.set(filePath, fileStat.size);
+    partialLines.set(filePath, indexedEvents.partialLine);
 
-    const buffered = `${partialLines.get(filePath) ?? ''}${chunk}`;
-    const lines = buffered.split('\n');
-    partialLines.set(filePath, lines.pop() ?? '');
-
-    for (const line of lines) {
-      if (!line.trim()) {
-        continue;
-      }
-
-      try {
-        const event = JSON.parse(line);
-        broadcast({
-          type: 'patrol.event.appended',
-          stream: streamFromFile(file),
-          file,
-          event
-        });
-      } catch (error) {
-        broadcast({
-          type: 'patrol.event.parse_error',
-          file,
-          line,
-          message: error instanceof Error ? error.message : String(error),
-          ts_ms: Date.now()
-        });
-      }
+    for (const indexedEvent of indexedEvents.events) {
+      broadcast({
+        type: 'patrol.event.appended',
+        stream: indexedEvent.stream,
+        file: indexedEvent.file,
+        event: indexedEvent.event
+      });
     }
   }
 }
@@ -139,22 +130,7 @@ async function sendCatchUpEvents(socket, cursor) {
     return;
   }
 
-  const events = [];
-  for (const file of await listCatchUpEventFiles(cursor)) {
-    const stream = streamFromFile(file);
-    const filePath = path.join(eventsDir, file);
-    const chunk = await readRange(filePath, 0, (await stat(filePath)).size);
-    for (const line of chunk.split('\n')) {
-      if (!line.trim()) {
-        continue;
-      }
-
-      const event = JSON.parse(line);
-      if (eventAfterCursor(event, cursor)) {
-        events.push({ stream, file, event });
-      }
-    }
-  }
+  const events = eventIndex.filter(({ event }) => eventAfterCursor(event, cursor));
 
   events.sort((left, right) => compareEvents(left.event, right.event) || left.stream.localeCompare(right.stream));
 
@@ -175,16 +151,6 @@ async function sendCatchUpEvents(socket, cursor) {
   });
 }
 
-async function listCatchUpEventFiles(cursor) {
-  const files = await listEventFiles();
-  const cursorDay = new Date(cursor.ts_ms).toISOString().slice(0, 10);
-
-  return files.filter((file) => {
-    const fileDay = dayFromEventFile(file);
-    return !fileDay || fileDay >= cursorDay;
-  });
-}
-
 async function listEventFiles() {
   const entries = await readdir(eventsDir);
   return entries
@@ -193,24 +159,107 @@ async function listEventFiles() {
     .sort();
 }
 
-function dayFromEventFile(file) {
-  return file.match(/^[^-]+-(\d{4}-\d{2}-\d{2})\.jsonl$/)?.[1] ?? null;
+async function indexEventFile(file, start, end, partialLine, emitParseErrors = false) {
+  if (end <= start) {
+    return {
+      events: [],
+      partialLine
+    };
+  }
+
+  const filePath = path.join(eventsDir, file);
+  const stream = streamFromFile(file);
+  const events = [];
+  let buffer = partialLine.buffer;
+  let lineStart = buffer.length > 0 ? partialLine.startOffset : start;
+
+  for await (const chunk of createReadStream(filePath, {
+    start,
+    end: end - 1
+  })) {
+    buffer = Buffer.concat([buffer, chunk]);
+
+    let newlineIndex = buffer.indexOf(10);
+    while (newlineIndex !== -1) {
+      const lineBuffer = buffer.subarray(0, newlineIndex);
+      const lineEnd = lineStart + lineBuffer.length + 1;
+      const indexedEvent = indexEventLine({
+        file,
+        filePath,
+        stream,
+        lineBuffer,
+        startOffset: lineStart,
+        endOffset: lineEnd,
+        emitParseErrors
+      });
+
+      if (indexedEvent) {
+        events.push(indexedEvent);
+      }
+
+      buffer = buffer.subarray(newlineIndex + 1);
+      lineStart = lineEnd;
+      newlineIndex = buffer.indexOf(10);
+    }
+  }
+
+  return {
+    events,
+    partialLine: {
+      buffer,
+      startOffset: lineStart
+    }
+  };
 }
 
-function readRange(filePath, start, end) {
-  return new Promise((resolve, reject) => {
-    let content = '';
-    const stream = createReadStream(filePath, {
-      encoding: 'utf8',
-      start,
-      end: end - 1
-    });
-    stream.on('data', (chunk) => {
-      content += chunk;
-    });
-    stream.on('error', reject);
-    stream.on('end', () => resolve(content));
-  });
+function indexEventLine(input) {
+  const line = input.lineBuffer.toString('utf8');
+  if (!line.trim()) {
+    return null;
+  }
+
+  try {
+    const event = JSON.parse(line);
+    const indexedEvent = {
+      stream: input.stream,
+      file: input.file,
+      filePath: input.filePath,
+      startOffset: input.startOffset,
+      endOffset: input.endOffset,
+      event
+    };
+    eventIndex.push(indexedEvent);
+    return indexedEvent;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (input.emitParseErrors) {
+      broadcast({
+        type: 'patrol.event.parse_error',
+        file: input.file,
+        line,
+        message,
+        ts_ms: Date.now()
+      });
+    } else {
+      console.warn(`skipping unparsable event line in ${input.file}: ${message}`);
+    }
+    return null;
+  }
+}
+
+function removeIndexedEventsForFile(filePath) {
+  for (let index = eventIndex.length - 1; index >= 0; index -= 1) {
+    if (eventIndex[index].filePath === filePath) {
+      eventIndex.splice(index, 1);
+    }
+  }
+}
+
+function emptyPartialLine() {
+  return {
+    buffer: Buffer.alloc(0),
+    startOffset: 0
+  };
 }
 
 function streamFromFile(file) {
