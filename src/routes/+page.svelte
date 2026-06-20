@@ -348,7 +348,7 @@
 
     const snapshot = await loadCachedCameraStateSnapshot();
     if (snapshot) {
-      cameraSnapshot = snapshot;
+      setCameraSnapshot(snapshot);
       return true;
     }
 
