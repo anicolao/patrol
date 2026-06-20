@@ -52,6 +52,12 @@
     samples: PersonRecognitionSample[];
     references: PersonRecognitionSample[];
   };
+  type KnownPersonGroup = {
+    label: string;
+    displayLabel: string;
+    count: number;
+    references: PersonRecognitionSample[];
+  };
 
   const liveEventPort = '5186';
   const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
@@ -101,6 +107,7 @@
   let suggestedPersonGroups: PersonTriageGroup[] = [];
   let unlabelledPersonSamples: PersonRecognitionSample[] = [];
   let visiblePersonLabels: string[] = [];
+  let knownPersonGroups: KnownPersonGroup[] = [];
   $: discoveryState = cameraSnapshot?.state ?? null;
   $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
@@ -160,6 +167,14 @@
     (sample) => !sample.suggestedLabel || (sample.suggestedScore ?? 0) < suggestedPersonScore
   );
   $: visiblePersonLabels = discoveryState?.people.labels.filter((label) => !isAnonymousPersonLabel(label)) ?? [];
+  $: knownPersonGroups = visiblePersonLabels
+    .map((label) => ({
+      label,
+      displayLabel: personLabelDisplay(label),
+      count: discoveryState?.people.labelCounts?.[label] ?? personReferenceSamples(label, personSamples).length,
+      references: personReferenceSamples(label, personSamples)
+    }))
+    .sort((left, right) => right.count - left.count || left.displayLabel.localeCompare(right.displayLabel));
 
   onMount(() => {
     hydrated = true;
@@ -1362,6 +1377,41 @@
           </div>
         </div>
 
+        {#if knownPersonGroups.length > 0}
+          <section class="known-people" aria-label="Known people">
+            <div class="person-group-header">
+              <div>
+                <h3>Known people</h3>
+                <p>Named identities replayed from the event log and used as references for future suggestions.</p>
+              </div>
+            </div>
+            <ol class="known-people-list">
+              {#each knownPersonGroups as person}
+                <li>
+                  <div class="known-person-header">
+                    <div>
+                      <h4>{person.displayLabel}</h4>
+                      <p>{person.count} labeled sample{person.count === 1 ? '' : 's'}</p>
+                    </div>
+                  </div>
+                  {#if person.references.length > 0}
+                    <div class="person-reference-strip" aria-label={`Reference ${person.displayLabel} samples`}>
+                      {#each person.references as reference}
+                        <img
+                          src={reference.cropUrl}
+                          alt={`Reference ${person.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+                        />
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="notice compact">No reference crops are in the compact browser state.</p>
+                  {/if}
+                </li>
+              {/each}
+            </ol>
+          </section>
+        {/if}
+
         {#if reviewablePersonSamples.length > 0}
           <div class="person-triage" aria-label="Person recognition triage">
             {#each highConfidencePersonGroups as group}
@@ -2444,6 +2494,45 @@
   .person-triage {
     display: grid;
     gap: 14px;
+  }
+
+  .known-people {
+    display: grid;
+    gap: 12px;
+    margin-bottom: 14px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 14px;
+  }
+
+  .known-people-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .known-people-list li {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    border: 1px solid #e2e5e9;
+    border-radius: 8px;
+    background: #f9fafb;
+    padding: 10px;
+  }
+
+  .known-person-header h4,
+  .known-person-header p {
+    margin-bottom: 0;
+  }
+
+  .known-person-header p {
+    color: #66727f;
+    line-height: 1.4;
   }
 
   .person-group {

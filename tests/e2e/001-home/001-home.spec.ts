@@ -997,6 +997,7 @@ function emptyPeople(): CameraDiscoveryState['people'] {
   return {
     samples: [],
     labels: [],
+    labelCounts: {},
     unlabeledCount: 0,
     labeledCount: 0
   };

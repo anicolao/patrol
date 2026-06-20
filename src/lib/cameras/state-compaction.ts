@@ -4,6 +4,7 @@ import type { CameraStateSnapshot } from '$lib/events';
 export const UI_RECORDING_EVENT_LIMIT = 500;
 export const UI_RECORDING_SEGMENT_LIMIT = 2500;
 export const UI_PERSON_SAMPLE_LIMIT = 300;
+export const UI_PERSON_REFERENCE_SAMPLE_LIMIT_PER_LABEL = 8;
 
 export function compactCameraStateSnapshot(snapshot: CameraStateSnapshot): CameraStateSnapshot {
   return {
@@ -18,9 +19,11 @@ export function compactCameraDiscoveryState(state: CameraDiscoveryState): Camera
   const people = state.people ?? {
     samples: [],
     labels: [],
+    labelCounts: {},
     unlabeledCount: 0,
     labeledCount: 0
   };
+  const samples = compactPersonSamples(people.samples);
 
   return {
     ...state,
@@ -31,9 +34,40 @@ export function compactCameraDiscoveryState(state: CameraDiscoveryState): Camera
     },
     people: {
       ...people,
-      samples: people.samples.slice(0, UI_PERSON_SAMPLE_LIMIT)
+      labelCounts: people.labelCounts ?? {},
+      samples
     }
   };
+}
+
+function compactPersonSamples(samples: CameraDiscoveryState['people']['samples']) {
+  const compacted = new Map<string, CameraDiscoveryState['people']['samples'][number]>();
+
+  for (const sample of samples.slice(0, UI_PERSON_SAMPLE_LIMIT)) {
+    compacted.set(sample.id, sample);
+  }
+
+  const namedLabels = Array.from(
+    new Set(
+      samples
+        .map((sample) => sample.label)
+        .filter((label): label is string => typeof label === 'string' && !label.startsWith('anonymous:'))
+    )
+  );
+
+  for (const label of namedLabels) {
+    const references = samples
+      .filter((sample) => sample.label === label && sample.status === 'analyzed' && sample.cropUrl)
+      .sort((left, right) => (right.labeledAtMs ?? 0) - (left.labeledAtMs ?? 0) || right.occurredAtMs - left.occurredAtMs)
+      .slice(0, UI_PERSON_REFERENCE_SAMPLE_LIMIT_PER_LABEL);
+    for (const sample of references) {
+      compacted.set(sample.id, sample);
+    }
+  }
+
+  return Array.from(compacted.values()).sort(
+    (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
+  );
 }
 
 function compactRecordingSegments(segments: RecordingSegment[], events: ReviewableSecurityEvent[]) {

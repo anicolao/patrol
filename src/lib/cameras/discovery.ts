@@ -118,6 +118,7 @@ export interface PersonRecognitionSample {
 export interface PersonRecognitionState {
   samples: PersonRecognitionSample[];
   labels: string[];
+  labelCounts: Record<string, number>;
   unlabeledCount: number;
   labeledCount: number;
 }

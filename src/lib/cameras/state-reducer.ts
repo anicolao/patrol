@@ -1232,6 +1232,9 @@ function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): Pe
   return {
     samples: refreshedSamples,
     labels,
+    labelCounts: Object.fromEntries(
+      labels.map((label) => [label, refreshedSamples.filter((sample) => sample.label === label).length])
+    ),
     unlabeledCount: refreshedSamples.filter(
       (sample) => !sample.label && !sample.dismissedAtMs && sample.status === 'analyzed'
     ).length,
