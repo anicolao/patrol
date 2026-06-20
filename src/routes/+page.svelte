@@ -10,6 +10,7 @@
     loadCachedCameraStateSnapshot,
     scheduleCameraStateSnapshotPersist
   } from '$lib/client/camera-state-cache';
+  import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
   import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
   import type { CameraStateSnapshot, EventCursor, PatrolEvent, StreamedPatrolEvent } from '$lib/events';
 
@@ -335,8 +336,9 @@
   }
 
   function setCameraSnapshot(snapshot: CameraStateSnapshot) {
-    cameraSnapshot = snapshot;
-    persistCameraSnapshot(snapshot);
+    const compacted = compactCameraStateSnapshot(snapshot);
+    cameraSnapshot = compacted;
+    persistCameraSnapshot(compacted);
   }
 
   async function loadCachedDiscoveryState() {

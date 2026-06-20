@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CameraStateSnapshot, PatrolEvent } from '$lib/events';
 import { reduceCameraDiscoveryEvents } from '$lib/cameras/state-reducer';
+import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
 import { latestCursorForEvents, readEvents } from '$lib/server/event-store';
 import { readSystemEvents } from '$lib/server/system-events';
 
@@ -12,17 +13,22 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
   if (!options.forceRefresh) {
     const cached = await readCachedCameraStateSnapshot();
     if (cached) {
-      return cached;
+      const compacted = compactCameraStateSnapshot(cached);
+      if (compacted.state.recordings.events.length !== cached.state.recordings.events.length ||
+        compacted.state.recordings.segments.length !== cached.state.recordings.segments.length) {
+        await writeStateSnapshot(compacted);
+      }
+      return compacted;
     }
   }
 
   const [cameraEvents, systemEvents] = await Promise.all([readEvents(CAMERA_STREAM), readSystemEvents()]);
   const events = [...cameraEvents, ...systemEvents];
-  const snapshot = {
+  const snapshot = compactCameraStateSnapshot({
     state: reduceCameraDiscoveryEvents(cameraEvents, systemEvents),
     cursor: latestCursorForEvents(events),
     cachedAtMs: Date.now()
-  };
+  });
   await writeStateSnapshot(snapshot);
   return snapshot;
 }
