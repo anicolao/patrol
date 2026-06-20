@@ -164,6 +164,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             kind: 'server',
             pid: 123,
             host: null,
+            gitRevision: 'test-revision',
             detail: 'SvelteKit API heartbeat route responded'
           }
         }
@@ -785,6 +786,7 @@ test('cached snapshot boots quickly and reconciles server state', async ({ page 
             kind: 'server',
             pid: 123,
             host: null,
+            gitRevision: 'test-revision',
             detail: 'SvelteKit API heartbeat route responded'
           }
         }
@@ -1021,6 +1023,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'SvelteKit API heartbeat route responded'
     },
@@ -1031,6 +1034,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Streams event log appends to browser clients'
     },
@@ -1041,6 +1045,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Fans out camera RTSP streams for preview and live view'
     },
@@ -1051,6 +1056,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Maintains camera ISAPI alert streams'
     },
@@ -1061,6 +1067,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Verifies server task health and sends failure notifications'
     },
@@ -1071,6 +1078,7 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       expectedEveryMs: 90000,
       lastAliveAtMs,
       lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Records main and sub streams into retained video segments'
     }

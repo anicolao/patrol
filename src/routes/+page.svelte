@@ -1413,6 +1413,7 @@
                 </div>
                 <div class="process-meta">
                   <span class="process-pill" data-health={process.health}>{processHealthLabel(process.health)}</span>
+                  <span>git {process.gitRevision ?? 'unknown'}</span>
                   <span>last alive {processLastAliveLabel(process.lastAliveAtMs)}</span>
                 </div>
               </li>

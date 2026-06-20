@@ -101,6 +101,7 @@ interface SystemProcessHeartbeatPayload {
   kind: 'server' | 'worker';
   pid: number | null;
   host: string | null;
+  gitRevision: string | null;
   detail: string | null;
 }
 
@@ -395,6 +396,7 @@ function reduceCameraDiscoveryStateEvent(
         tsMs: heartbeat.ts_ms,
         eventType: heartbeat.type,
         detail: heartbeat.payload.detail,
+        gitRevision: heartbeat.payload.gitRevision ?? null,
         healthOverride: null
       });
     }
@@ -405,6 +407,7 @@ function reduceCameraDiscoveryStateEvent(
         tsMs: exited.ts_ms,
         eventType: exited.type,
         detail: exited.payload.detail,
+        gitRevision: exited.payload.gitRevision ?? null,
         healthOverride: 'error'
       });
     }
@@ -573,6 +576,7 @@ function withGo2rtcStreamsObserved(
       detail: event.payload.rawResult.ok
         ? 'go2rtc API health check responded'
         : event.payload.rawResult.error ?? 'go2rtc API health check failed',
+      gitRevision: null,
       healthOverride: event.payload.rawResult.ok ? null : 'error'
     }
   );
@@ -603,6 +607,7 @@ function withAnnkeIsapiResponseObserved(
       detail: event.payload.rawResult.ok
         ? 'Annke ISAPI health check responded'
         : event.payload.rawResult.error ?? 'Annke ISAPI health check failed',
+      gitRevision: null,
       healthOverride: event.payload.rawResult.ok ? null : 'error'
     }
   );
@@ -661,6 +666,7 @@ function withAnnkeAlertStreamMessageReceived(
       tsMs: event.ts_ms,
       eventType: event.type,
       detail: 'Annke alert stream delivered an event',
+      gitRevision: null,
       healthOverride: null
     }
   );
@@ -699,6 +705,7 @@ function withRecordingSegmentObserved(
       tsMs: event.ts_ms,
       eventType: event.type,
       detail: `${event.payload.role} segment recorded for ${event.payload.streamName}`,
+      gitRevision: null,
       healthOverride: null
     }
   );
@@ -726,6 +733,7 @@ function reduceSystemProcesses(
       tsMs: number;
       eventType: string;
       detail: string | null;
+      gitRevision: string | null;
       healthOverride: SystemProcessStatus['health'] | null;
     }
   >();
@@ -737,6 +745,7 @@ function reduceSystemProcesses(
         tsMs: heartbeat.ts_ms,
         eventType: heartbeat.type,
         detail: heartbeat.payload.detail,
+        gitRevision: heartbeat.payload.gitRevision ?? null,
         healthOverride: null
       });
     }
@@ -747,6 +756,7 @@ function reduceSystemProcesses(
         tsMs: exited.ts_ms,
         eventType: exited.type,
         detail: exited.payload.detail,
+        gitRevision: exited.payload.gitRevision ?? null,
         healthOverride: 'error'
       });
     }
@@ -761,6 +771,7 @@ function reduceSystemProcesses(
         detail: observed.payload.rawResult.ok
           ? 'go2rtc API health check responded'
           : observed.payload.rawResult.error ?? 'go2rtc API health check failed',
+        gitRevision: null,
         healthOverride: observed.payload.rawResult.ok ? null : 'error'
       });
     }
@@ -773,6 +784,7 @@ function reduceSystemProcesses(
         detail: observed.payload.rawResult.ok
           ? 'Annke ISAPI health check responded'
           : observed.payload.rawResult.error ?? 'Annke ISAPI health check failed',
+        gitRevision: null,
         healthOverride: observed.payload.rawResult.ok ? null : 'error'
       });
     }
@@ -782,6 +794,7 @@ function reduceSystemProcesses(
         tsMs: event.ts_ms,
         eventType: event.type,
         detail: 'Annke alert stream delivered an event',
+        gitRevision: null,
         healthOverride: null
       });
     }
@@ -792,6 +805,7 @@ function reduceSystemProcesses(
         tsMs: observed.ts_ms,
         eventType: observed.type,
         detail: `${observed.payload.role} segment recorded for ${observed.payload.streamName}`,
+        gitRevision: null,
         healthOverride: null
       });
     }
@@ -815,6 +829,7 @@ function reduceSystemProcesses(
       expectedEveryMs: task.expectedEveryMs,
       lastAliveAtMs: latest?.tsMs ?? null,
       lastEventType: latest?.eventType ?? null,
+      gitRevision: latest?.gitRevision ?? null,
       health,
       detail: latest?.detail ?? task.detail
     };
@@ -951,6 +966,7 @@ function withProcessEvent(
     tsMs: number;
     eventType: string;
     detail: string | null;
+    gitRevision: string | null;
     healthOverride: SystemProcessStatus['health'] | null;
   }
 ): CameraDiscoveryState {
@@ -963,6 +979,7 @@ function withProcessEvent(
     expectedEveryMs: existing?.expectedEveryMs ?? task?.expectedEveryMs ?? PROCESS_STALE_AFTER_MS,
     lastAliveAtMs: event.tsMs,
     lastEventType: event.eventType,
+    gitRevision: event.gitRevision ?? existing?.gitRevision ?? null,
     health: event.healthOverride === 'error' ? 'error' : 'ok',
     detail: event.detail ?? existing?.detail ?? task?.detail ?? null
   };
@@ -1132,6 +1149,7 @@ function updateProcessEvent(
       tsMs: number;
       eventType: string;
       detail: string | null;
+      gitRevision: string | null;
       healthOverride: SystemProcessStatus['health'] | null;
     }
   >,
@@ -1140,12 +1158,16 @@ function updateProcessEvent(
     tsMs: number;
     eventType: string;
     detail: string | null;
+    gitRevision: string | null;
     healthOverride: SystemProcessStatus['health'] | null;
   }
 ) {
   const existing = latestByProcessId.get(processId);
   if (!existing || event.tsMs >= existing.tsMs) {
-    latestByProcessId.set(processId, event);
+    latestByProcessId.set(processId, {
+      ...event,
+      gitRevision: event.gitRevision ?? existing?.gitRevision ?? null
+    });
   }
 }
 

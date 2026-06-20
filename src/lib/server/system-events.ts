@@ -2,6 +2,7 @@ import type { PatrolEvent } from '$lib/events';
 import { appendEvent, readEvents } from '$lib/server/event-store';
 
 const SYSTEM_STREAM = 'system';
+const gitRevision = import.meta.env.VITE_PATROL_GIT_REVISION ?? null;
 
 export interface SystemProcessHeartbeatPayload {
   processId: string;
@@ -9,6 +10,7 @@ export interface SystemProcessHeartbeatPayload {
   kind: 'server' | 'worker';
   pid: number | null;
   host: string | null;
+  gitRevision: string | null;
   detail: string | null;
 }
 
@@ -17,11 +19,20 @@ export interface SystemProcessExitedPayload extends SystemProcessHeartbeatPayloa
   signal: string | null;
 }
 
-export async function appendSystemProcessHeartbeat(payload: SystemProcessHeartbeatPayload) {
+type SystemProcessHeartbeatInput = Omit<SystemProcessHeartbeatPayload, 'gitRevision'> & {
+  gitRevision?: string | null;
+};
+
+export async function appendSystemProcessHeartbeat(payload: SystemProcessHeartbeatInput) {
+  const stampedPayload: SystemProcessHeartbeatPayload = {
+    ...payload,
+    gitRevision: payload.gitRevision ?? gitRevision
+  };
+
   return await appendEvent<SystemProcessHeartbeatPayload>(SYSTEM_STREAM, {
     type: 'system.process.heartbeat',
-    source: payload.processId,
-    payload
+    source: stampedPayload.processId,
+    payload: stampedPayload
   });
 }
 

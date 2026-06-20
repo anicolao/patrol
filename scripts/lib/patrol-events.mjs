@@ -6,6 +6,7 @@ import path from 'node:path';
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
 const eventsDir = path.join(dataRoot, 'events');
 const host = hostname();
+const gitRevision = resolveGitRevision();
 
 export async function appendCameraEvent(event) {
   return await appendEvent('cameras', event);
@@ -25,6 +26,7 @@ export async function appendProcessHeartbeat(input) {
       kind: input.kind,
       pid: process.pid,
       host,
+      gitRevision,
       detail: input.detail ?? null
     }
   });
@@ -55,11 +57,16 @@ export async function appendProcessExited(input) {
       kind: input.kind,
       pid: process.pid,
       host,
+      gitRevision,
       exitCode: input.exitCode ?? null,
       signal: input.signal ?? null,
       detail: input.detail ?? null
     }
   });
+}
+
+function resolveGitRevision() {
+  return process.env.PATROL_GIT_REVISION || process.env.VITE_PATROL_GIT_REVISION || null;
 }
 
 async function appendEvent(stream, event) {

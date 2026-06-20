@@ -128,6 +128,7 @@ export interface SystemProcessStatus {
   expectedEveryMs: number;
   lastAliveAtMs: number | null;
   lastEventType: string | null;
+  gitRevision: string | null;
   health: SystemProcessHealth;
   detail: string | null;
 }
