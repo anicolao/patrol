@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
+import { patrolRecordingsDir } from '$lib/server/paths';
 
 export async function GET({ request, url }) {
   const relativePath = url.searchParams.get('path');
@@ -10,7 +11,7 @@ export async function GET({ request, url }) {
     error(400, 'Missing recording path.');
   }
 
-  const recordingsDir = path.join(process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol'), 'recordings');
+  const recordingsDir = patrolRecordingsDir();
   const absolutePath = path.resolve(recordingsDir, relativePath);
   const resolvedRoot = path.resolve(recordingsDir);
   if (!absolutePath.startsWith(`${resolvedRoot}${path.sep}`)) {

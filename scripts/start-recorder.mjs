@@ -7,11 +7,12 @@ import {
   appendProcessExited,
   startProcessHeartbeats
 } from './lib/patrol-events.mjs';
+import { patrolDataRoot, patrolRecordingsDir } from './lib/patrol-paths.mjs';
 
-const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
+const dataRoot = patrolDataRoot();
 const eventsDir = path.join(dataRoot, 'events');
 const secretsDir = path.join(dataRoot, 'secrets');
-const recordingsDir = path.join(dataRoot, 'recordings');
+const recordingsDir = patrolRecordingsDir(dataRoot);
 const go2rtcRtspBaseUrl = process.env.PATROL_GO2RTC_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
 const segmentSeconds = Number(process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '15');
 const scanEveryMs = Number(process.env.PATROL_RECORDING_SCAN_MS ?? '10000');

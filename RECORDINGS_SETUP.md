@@ -47,7 +47,7 @@ For Annke/Hikvision-compatible cameras, Patrol configures go2rtc with:
 Recorded files live under:
 
 ```text
-.patrol/recordings/<stream-name>/<epoch-seconds>.mp4
+${PATROL_RECORDINGS_DIR:-${PATROL_DATA_DIR:-.patrol}/recordings}/<stream-name>/<epoch-seconds>.mp4
 ```
 
 Completed segment facts append to:
@@ -64,9 +64,19 @@ Retention is enforced by the recorder:
 Environment overrides:
 
 ```sh
+PATROL_DATA_DIR=.patrol
+PATROL_RECORDINGS_DIR=.patrol/recordings
 PATROL_GO2RTC_RTSP_BASE_URL=rtsp://127.0.0.1:8554
 PATROL_RECORDING_SEGMENT_SECONDS=15
 PATROL_RECORDING_MIN_SEGMENT_BYTES=262144
 PATROL_MAIN_RECORDING_RETENTION_DAYS=7
 PATROL_SUB_RECORDING_RETENTION_DAYS=30
+```
+
+On the Mac mini deployment, use a data root for event logs and secrets and a
+separate recordings root on the NVR volume:
+
+```sh
+PATROL_DATA_DIR=/Volumes/NVR/patrol
+PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings
 ```
