@@ -3,6 +3,7 @@ import type { CameraStateSnapshot } from '$lib/events';
 
 export const UI_RECORDING_EVENT_LIMIT = 500;
 export const UI_RECORDING_SEGMENT_LIMIT = 2500;
+export const UI_PERSON_SAMPLE_LIMIT = 300;
 
 export function compactCameraStateSnapshot(snapshot: CameraStateSnapshot): CameraStateSnapshot {
   return {
@@ -14,6 +15,12 @@ export function compactCameraStateSnapshot(snapshot: CameraStateSnapshot): Camer
 export function compactCameraDiscoveryState(state: CameraDiscoveryState): CameraDiscoveryState {
   const events = state.recordings.events.slice(0, UI_RECORDING_EVENT_LIMIT);
   const segments = compactRecordingSegments(state.recordings.segments, events);
+  const people = state.people ?? {
+    samples: [],
+    labels: [],
+    unlabeledCount: 0,
+    labeledCount: 0
+  };
 
   return {
     ...state,
@@ -21,6 +28,10 @@ export function compactCameraDiscoveryState(state: CameraDiscoveryState): Camera
       ...state.recordings,
       events,
       segments
+    },
+    people: {
+      ...people,
+      samples: people.samples.slice(0, UI_PERSON_SAMPLE_LIMIT)
     }
   };
 }

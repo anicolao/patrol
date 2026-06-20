@@ -79,6 +79,49 @@ export interface RecordingState {
   storage: RecordingStorageEstimate;
 }
 
+export interface PersonCropBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PersonRecognitionEmbedding {
+  model: string;
+  dimensions: number;
+  vector: number[];
+}
+
+export interface PersonRecognitionSample {
+  id: string;
+  cameraId: string;
+  sourceEventId: string;
+  occurredAtMs: number;
+  status: 'analyzed' | 'failed';
+  cropRelativePath: string | null;
+  cropUrl: string | null;
+  cropBox: PersonCropBox | null;
+  cropMethod: string | null;
+  cropVersion: string | null;
+  sourceSegmentRelativePath: string | null;
+  sourceOffsetMs: number | null;
+  embedding: PersonRecognitionEmbedding | null;
+  label: string | null;
+  suggestedLabel: string | null;
+  suggestedScore: number | null;
+  error: string | null;
+  analyzedAtMs: number | null;
+  labeledAtMs: number | null;
+  dismissedAtMs: number | null;
+}
+
+export interface PersonRecognitionState {
+  samples: PersonRecognitionSample[];
+  labels: string[];
+  unlabeledCount: number;
+  labeledCount: number;
+}
+
 export type AnnkeAiHealth = 'unknown' | 'motion_enabled' | 'alert_idle' | 'alert_active' | 'error';
 
 export interface AnnkeCameraAiStatus {
@@ -165,6 +208,7 @@ export interface CameraDiscoveryState {
   processes: SystemProcessStatus[];
   devices: DiscoveredCamera[];
   recordings: RecordingState;
+  people: PersonRecognitionState;
   errors: string[];
   lastDiscovery: {
     runId: string;

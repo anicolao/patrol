@@ -9,6 +9,10 @@ import type {
   Go2rtcCameraStatus,
   Go2rtcStreamRole,
   Go2rtcStreamStatus,
+  PersonCropBox,
+  PersonRecognitionEmbedding,
+  PersonRecognitionSample,
+  PersonRecognitionState,
   RawProbeResponse,
   RecordingSegment,
   RecordingState,
@@ -75,6 +79,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Records main and sub streams into retained video segments'
+  },
+  {
+    id: 'patrol-person-recognizer',
+    label: 'Person recognition worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Extracts person crops and classifies local recognition samples'
   }
 ];
 
@@ -127,6 +138,38 @@ export interface CameraControlCompletedPayload extends CameraControlRequestedPay
 
 export interface CameraControlFailedPayload extends CameraControlRequestedPayload {
   error: string;
+}
+
+export interface PersonRecognitionSampleAnalyzedPayload {
+  sampleId: string;
+  cameraId: string;
+  sourceEventId: string;
+  occurredAtMs: number;
+  sourceSegmentRelativePath: string;
+  sourceOffsetMs: number;
+  cropRelativePath: string;
+  cropBox: PersonCropBox | null;
+  cropMethod?: string;
+  cropVersion?: string;
+  embedding: PersonRecognitionEmbedding;
+}
+
+export interface PersonRecognitionSampleFailedPayload {
+  sampleId: string;
+  cameraId: string;
+  sourceEventId: string;
+  occurredAtMs: number;
+  cropVersion?: string;
+  error: string;
+}
+
+export interface PersonRecognitionSampleLabeledPayload {
+  sampleId: string;
+  label: string;
+}
+
+export interface PersonRecognitionSampleDismissedPayload {
+  sampleId: string;
 }
 
 export interface Go2rtcConfiguredStream {
@@ -218,11 +261,17 @@ export function reduceCameraDiscoveryEvents(
   const recordingSegmentsByPath = new Map<string, RecordingSegment>();
   const expiredRecordingPaths = new Set<string>();
   const alertEvents: Array<PatrolEvent<AnnkeAlertStreamMessageReceivedPayload>> = [];
+  const personEvents: PatrolEvent[] = [];
   let latestCompleted: PatrolEvent<DiscoveryCompletedPayload> | null = null;
   let latestGo2rtcObservation: PatrolEvent<Go2rtcStreamsObservedPayload> | null = null;
   const nowMs = Date.now();
 
   for (const event of events) {
+    if (event.type.startsWith('person.recognition.')) {
+      personEvents.push(event);
+      continue;
+    }
+
     if (event.type === 'camera.credentials.saved') {
       const saved = event as PatrolEvent<CameraCredentialsSavedPayload>;
       credentialsByCameraId.set(saved.payload.cameraId, {
@@ -359,6 +408,7 @@ export function reduceCameraDiscoveryEvents(
       processes: reduceSystemProcesses(events, systemEvents),
       devices: [],
       recordings: buildRecordingState([], [], 0),
+      people: buildPersonRecognitionState(personEvents),
       errors: [],
       lastDiscovery: null
     };
@@ -381,6 +431,7 @@ export function reduceCameraDiscoveryEvents(
     processes: reduceSystemProcesses(events, systemEvents),
     devices,
     recordings: buildRecordingState(recordingSegments, alertEvents, devices.length),
+    people: buildPersonRecognitionState(personEvents),
     errors: rawResult.errors,
     lastDiscovery: {
       runId: latestCompleted.correlation_id ?? latestCompleted.id,
@@ -461,6 +512,20 @@ function reduceCameraDiscoveryStateEvent(
       return withRecordingSegmentObserved(state, event as PatrolEvent<RecordingSegmentObservedPayload>);
     case 'recording.segment.expired':
       return withRecordingSegmentExpired(state, event as PatrolEvent<RecordingSegmentExpiredPayload>);
+    case 'person.recognition.sample.analyzed':
+      return withPersonRecognitionSampleAnalyzed(
+        state,
+        event as PatrolEvent<PersonRecognitionSampleAnalyzedPayload>
+      );
+    case 'person.recognition.sample.failed':
+      return withPersonRecognitionSampleFailed(state, event as PatrolEvent<PersonRecognitionSampleFailedPayload>);
+    case 'person.recognition.sample.labeled':
+      return withPersonRecognitionSampleLabeled(state, event as PatrolEvent<PersonRecognitionSampleLabeledPayload>);
+    case 'person.recognition.sample.dismissed':
+      return withPersonRecognitionSampleDismissed(
+        state,
+        event as PatrolEvent<PersonRecognitionSampleDismissedPayload>
+      );
     default:
       return state;
   }
@@ -747,6 +812,141 @@ function withRecordingSegmentExpired(
   };
 }
 
+function withPersonRecognitionSampleAnalyzed(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<PersonRecognitionSampleAnalyzedPayload>
+): CameraDiscoveryState {
+  const people = personRecognitionState(state);
+  const sample = analyzedPersonSample(event, people.samples.find((candidate) => candidate.id === event.payload.sampleId));
+  return withProcessEvent(
+    {
+      ...state,
+      people: rebuildPersonRecognitionSamples([
+        sample,
+        ...people.samples.filter((candidate) => candidate.id !== sample.id)
+      ])
+    },
+    'patrol-person-recognizer',
+    {
+      tsMs: event.ts_ms,
+      eventType: event.type,
+      detail: `Analyzed person sample for ${event.payload.cameraId}`,
+      gitRevision: null,
+      healthOverride: null
+    }
+  );
+}
+
+function withPersonRecognitionSampleFailed(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<PersonRecognitionSampleFailedPayload>
+): CameraDiscoveryState {
+  const people = personRecognitionState(state);
+  const existing = people.samples.find((candidate) => candidate.id === event.payload.sampleId);
+  if (existing?.status === 'analyzed') {
+    return withProcessEvent(state, 'patrol-person-recognizer', {
+      tsMs: event.ts_ms,
+      eventType: event.type,
+      detail: `Ignored later failure for analyzed person sample ${event.payload.sampleId}`,
+      gitRevision: null,
+      healthOverride: null
+    });
+  }
+
+  const sample: PersonRecognitionSample = {
+    id: event.payload.sampleId,
+    cameraId: event.payload.cameraId,
+    sourceEventId: event.payload.sourceEventId,
+    occurredAtMs: event.payload.occurredAtMs,
+    status: 'failed',
+    cropRelativePath: null,
+    cropUrl: null,
+    cropBox: null,
+    cropMethod: null,
+    cropVersion: event.payload.cropVersion ?? null,
+    sourceSegmentRelativePath: null,
+    sourceOffsetMs: null,
+    embedding: null,
+    label: existing?.label ?? null,
+    suggestedLabel: null,
+    suggestedScore: null,
+    error: event.payload.error,
+    analyzedAtMs: event.ts_ms,
+    labeledAtMs: existing?.labeledAtMs ?? null,
+    dismissedAtMs: existing?.dismissedAtMs ?? null
+  };
+
+  return withProcessEvent(
+    {
+      ...state,
+      people: rebuildPersonRecognitionSamples([
+        sample,
+        ...people.samples.filter((candidate) => candidate.id !== sample.id)
+      ])
+    },
+    'patrol-person-recognizer',
+    {
+      tsMs: event.ts_ms,
+      eventType: event.type,
+      detail: event.payload.error,
+      gitRevision: null,
+      healthOverride: null
+    }
+  );
+}
+
+function withPersonRecognitionSampleLabeled(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<PersonRecognitionSampleLabeledPayload>
+): CameraDiscoveryState {
+  const label = personLabelForLabeledEvent(event);
+  const samples = personRecognitionState(state).samples.map((sample) =>
+    sample.id === event.payload.sampleId
+      ? {
+          ...sample,
+          label,
+          labeledAtMs: event.ts_ms,
+          dismissedAtMs: null,
+          suggestedLabel: null,
+          suggestedScore: null
+        }
+      : sample
+  );
+
+  return {
+    ...state,
+    people: rebuildPersonRecognitionSamples(samples)
+  };
+}
+
+function withPersonRecognitionSampleDismissed(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<PersonRecognitionSampleDismissedPayload>
+): CameraDiscoveryState {
+  const anonymousLabel = anonymousPersonLabelForDismissal(event);
+  const samples = personRecognitionState(state).samples.map((sample) =>
+    sample.id === event.payload.sampleId
+      ? {
+          ...sample,
+          label: anonymousLabel,
+          labeledAtMs: event.ts_ms,
+          suggestedLabel: null,
+          suggestedScore: null,
+          dismissedAtMs: event.ts_ms
+        }
+      : sample
+  );
+
+  return {
+    ...state,
+    people: rebuildPersonRecognitionSamples(samples)
+  };
+}
+
+function personRecognitionState(state: CameraDiscoveryState): PersonRecognitionState {
+  return state.people ?? buildPersonRecognitionState([]);
+}
+
 function reduceSystemProcesses(
   cameraEvents: PatrolEvent[],
   systemEvents: PatrolEvent[]
@@ -834,6 +1034,28 @@ function reduceSystemProcesses(
         healthOverride: null
       });
     }
+
+    if (event.type === 'person.recognition.sample.analyzed') {
+      const observed = event as PatrolEvent<PersonRecognitionSampleAnalyzedPayload>;
+      updateProcessEvent(latestByProcessId, 'patrol-person-recognizer', {
+        tsMs: observed.ts_ms,
+        eventType: observed.type,
+        detail: `Analyzed person sample for ${observed.payload.cameraId}`,
+        gitRevision: null,
+        healthOverride: null
+      });
+    }
+
+    if (event.type === 'person.recognition.sample.failed') {
+      const failed = event as PatrolEvent<PersonRecognitionSampleFailedPayload>;
+      updateProcessEvent(latestByProcessId, 'patrol-person-recognizer', {
+        tsMs: failed.ts_ms,
+        eventType: failed.type,
+        detail: failed.payload.error,
+        gitRevision: null,
+        healthOverride: null
+      });
+    }
   }
 
   return SYSTEM_PROCESS_TASKS.map((task) => {
@@ -859,6 +1081,221 @@ function reduceSystemProcesses(
       detail: latest?.detail ?? task.detail
     };
   });
+}
+
+function buildPersonRecognitionState(events: PatrolEvent[]): PersonRecognitionState {
+  let samples: PersonRecognitionSample[] = [];
+
+  for (const event of events) {
+    if (event.type === 'person.recognition.sample.analyzed') {
+      const analyzed = event as PatrolEvent<PersonRecognitionSampleAnalyzedPayload>;
+      const sample = analyzedPersonSample(analyzed, samples.find((candidate) => candidate.id === analyzed.payload.sampleId));
+      samples = [sample, ...samples.filter((candidate) => candidate.id !== sample.id)];
+      continue;
+    }
+
+    if (event.type === 'person.recognition.sample.failed') {
+      const failed = event as PatrolEvent<PersonRecognitionSampleFailedPayload>;
+      const existing = samples.find((candidate) => candidate.id === failed.payload.sampleId);
+      if (existing?.status === 'analyzed') {
+        continue;
+      }
+
+      const sample: PersonRecognitionSample = {
+        id: failed.payload.sampleId,
+        cameraId: failed.payload.cameraId,
+        sourceEventId: failed.payload.sourceEventId,
+        occurredAtMs: failed.payload.occurredAtMs,
+        status: 'failed',
+        cropRelativePath: null,
+        cropUrl: null,
+        cropBox: null,
+        cropMethod: null,
+        cropVersion: failed.payload.cropVersion ?? null,
+        sourceSegmentRelativePath: null,
+        sourceOffsetMs: null,
+        embedding: null,
+        label: existing?.label ?? null,
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: failed.payload.error,
+        analyzedAtMs: failed.ts_ms,
+        labeledAtMs: existing?.labeledAtMs ?? null,
+        dismissedAtMs: existing?.dismissedAtMs ?? null
+      };
+      samples = [sample, ...samples.filter((candidate) => candidate.id !== sample.id)];
+      continue;
+    }
+
+    if (event.type === 'person.recognition.sample.labeled') {
+      const labeled = event as PatrolEvent<PersonRecognitionSampleLabeledPayload>;
+      const label = personLabelForLabeledEvent(labeled);
+      samples = samples.map((sample) =>
+        sample.id === labeled.payload.sampleId
+          ? {
+              ...sample,
+              label,
+              labeledAtMs: labeled.ts_ms,
+              dismissedAtMs: null,
+              suggestedLabel: null,
+              suggestedScore: null
+            }
+          : sample
+      );
+      continue;
+    }
+
+    if (event.type === 'person.recognition.sample.dismissed') {
+      const dismissed = event as PatrolEvent<PersonRecognitionSampleDismissedPayload>;
+      const anonymousLabel = anonymousPersonLabelForDismissal(dismissed);
+      samples = samples.map((sample) =>
+        sample.id === dismissed.payload.sampleId
+          ? {
+              ...sample,
+              label: anonymousLabel,
+              labeledAtMs: dismissed.ts_ms,
+              suggestedLabel: null,
+              suggestedScore: null,
+              dismissedAtMs: dismissed.ts_ms
+            }
+          : sample
+      );
+    }
+  }
+
+  return rebuildPersonRecognitionSamples(samples);
+}
+
+function personLabelForLabeledEvent(event: PatrolEvent<PersonRecognitionSampleLabeledPayload>) {
+  return event.payload.label.startsWith('anonymous:') ? anonymousPersonLabelForEvent(event) : event.payload.label;
+}
+
+function anonymousPersonLabelForDismissal(event: PatrolEvent<PersonRecognitionSampleDismissedPayload>) {
+  return anonymousPersonLabelForEvent(event);
+}
+
+function anonymousPersonLabelForEvent(event: PatrolEvent) {
+  return `anonymous:${event.id}`;
+}
+
+function analyzedPersonSample(
+  event: PatrolEvent<PersonRecognitionSampleAnalyzedPayload>,
+  existing: PersonRecognitionSample | undefined
+): PersonRecognitionSample {
+  return {
+    id: event.payload.sampleId,
+    cameraId: event.payload.cameraId,
+    sourceEventId: event.payload.sourceEventId,
+    occurredAtMs: event.payload.occurredAtMs,
+    status: 'analyzed',
+    cropRelativePath: event.payload.cropRelativePath,
+    cropUrl: `/api/person-recognition/crops?path=${encodeURIComponent(event.payload.cropRelativePath)}`,
+    cropBox: event.payload.cropBox,
+    cropMethod: event.payload.cropMethod ?? null,
+    cropVersion: event.payload.cropVersion ?? null,
+    sourceSegmentRelativePath: event.payload.sourceSegmentRelativePath,
+    sourceOffsetMs: event.payload.sourceOffsetMs,
+    embedding: event.payload.embedding,
+    label: existing?.label ?? null,
+    suggestedLabel: existing?.label ? null : existing?.suggestedLabel ?? null,
+    suggestedScore: existing?.label ? null : existing?.suggestedScore ?? null,
+    error: null,
+    analyzedAtMs: event.ts_ms,
+    labeledAtMs: existing?.labeledAtMs ?? null,
+    dismissedAtMs: existing?.dismissedAtMs ?? null
+  };
+}
+
+function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): PersonRecognitionState {
+  const labeledSamples = samples.filter((sample) => sample.label && sample.embedding);
+  const centroids = personLabelCentroids(labeledSamples);
+  const refreshedSamples = samples
+    .map((sample) => {
+      if (sample.label || !sample.embedding || centroids.length === 0) {
+        return {
+          ...sample,
+          suggestedLabel: sample.label ? null : sample.suggestedLabel,
+          suggestedScore: sample.label ? null : sample.suggestedScore
+        };
+      }
+
+      const suggestion = nearestPersonLabel(sample.embedding.vector, centroids);
+      return {
+        ...sample,
+        suggestedLabel: suggestion?.score && suggestion.score >= 0.3 ? suggestion.label : null,
+        suggestedScore: suggestion?.score ?? null
+      };
+    })
+    .sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id));
+  const labels = Array.from(new Set(refreshedSamples.map((sample) => sample.label).filter(isString))).sort();
+
+  return {
+    samples: refreshedSamples,
+    labels,
+    unlabeledCount: refreshedSamples.filter(
+      (sample) => !sample.label && !sample.dismissedAtMs && sample.status === 'analyzed'
+    ).length,
+    labeledCount: refreshedSamples.filter((sample) => sample.label).length
+  };
+}
+
+function personLabelCentroids(samples: PersonRecognitionSample[]) {
+  const vectorsByLabel = new Map<string, number[][]>();
+  for (const sample of samples) {
+    if (!sample.label || !sample.embedding) {
+      continue;
+    }
+    vectorsByLabel.set(sample.label, [...(vectorsByLabel.get(sample.label) ?? []), sample.embedding.vector]);
+  }
+
+  return Array.from(vectorsByLabel.entries()).map(([label, vectors]) => ({
+    label,
+    vector: averageVectors(vectors)
+  }));
+}
+
+function nearestPersonLabel(vector: number[], centroids: Array<{ label: string; vector: number[] }>) {
+  let best: { label: string; score: number } | null = null;
+  for (const centroid of centroids) {
+    const score = cosineSimilarity(vector, centroid.vector);
+    if (!best || score > best.score) {
+      best = { label: centroid.label, score };
+    }
+  }
+  return best;
+}
+
+function averageVectors(vectors: number[][]) {
+  const width = Math.max(0, ...vectors.map((vector) => vector.length));
+  const averaged = Array(width).fill(0) as number[];
+  for (const vector of vectors) {
+    for (let index = 0; index < width; index += 1) {
+      averaged[index] += vector[index] ?? 0;
+    }
+  }
+  return averaged.map((value) => value / vectors.length);
+}
+
+function cosineSimilarity(left: number[], right: number[]) {
+  const width = Math.min(left.length, right.length);
+  let dot = 0;
+  let leftMagnitude = 0;
+  let rightMagnitude = 0;
+  for (let index = 0; index < width; index += 1) {
+    const leftValue = left[index] ?? 0;
+    const rightValue = right[index] ?? 0;
+    dot += leftValue * rightValue;
+    leftMagnitude += leftValue * leftValue;
+    rightMagnitude += rightValue * rightValue;
+  }
+  if (!leftMagnitude || !rightMagnitude) {
+    return 0;
+  }
+  return dot / Math.sqrt(leftMagnitude * rightMagnitude);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
 }
 
 function buildRecordingState(

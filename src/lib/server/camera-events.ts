@@ -11,6 +11,8 @@ import {
   type DiscoveryInitiatedPayload,
   type Go2rtcObservationRequestedPayload,
   type Go2rtcStreamsObservedPayload,
+  type PersonRecognitionSampleDismissedPayload,
+  type PersonRecognitionSampleLabeledPayload,
   type RecordingSegmentExpiredPayload,
   type RecordingSegmentObservedPayload,
   reduceCameraDiscoveryEvents
@@ -69,6 +71,22 @@ export async function appendCameraControlCompleted(payload: CameraControlComplet
 export async function appendCameraControlFailed(payload: CameraControlFailedPayload) {
   return await appendEvent<CameraControlFailedPayload>(CAMERA_STREAM, {
     type: 'camera.control.failed',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleLabeled(payload: PersonRecognitionSampleLabeledPayload) {
+  return await appendEvent<PersonRecognitionSampleLabeledPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.labeled',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendPersonRecognitionSampleDismissed(payload: PersonRecognitionSampleDismissedPayload) {
+  return await appendEvent<PersonRecognitionSampleDismissedPayload>(CAMERA_STREAM, {
+    type: 'person.recognition.sample.dismissed',
     source: 'patrol-web',
     payload
   });

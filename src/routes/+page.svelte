@@ -4,6 +4,7 @@
   import type {
     CameraDiscoveryState,
     DiscoveredCamera,
+    PersonRecognitionSample,
     RecordingSegment,
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
@@ -15,7 +16,7 @@
   import { reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
   import type { CameraStateSnapshot, EventCursor, PatrolEvent, StreamedPatrolEvent } from '$lib/events';
 
-  type Tab = 'cameras' | 'history' | 'settings' | 'health';
+  type Tab = 'cameras' | 'people' | 'history' | 'settings' | 'health';
   type LiveEventConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
   type LiveEventEntry = {
     receivedAtMs: number;
@@ -44,6 +45,13 @@
     groups: HistoryTimelineGroup[];
     ticks: HistoryTimelineTick[];
   };
+  type PersonTriageGroup = {
+    key: string;
+    label: string;
+    displayLabel: string;
+    samples: PersonRecognitionSample[];
+    references: PersonRecognitionSample[];
+  };
 
   const liveEventPort = '5186';
   const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
@@ -51,6 +59,10 @@
   const historyTimelineBucketMs = 5 * 60 * 1000;
   const historyTimelinePaddingPx = 168;
   const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
+  const reviewablePersonCropVersion = 'motion-diff-v3';
+  const highConfidencePersonScore = 0.8;
+  const suggestedPersonScore = 0.3;
+  const historyPersonScore = 0.85;
 
   let cameraSnapshot: CameraStateSnapshot | null = null;
   let error: string | null = null;
@@ -66,6 +78,7 @@
   let liveEventError: string | null = null;
   let liveEventUrl = '';
   let liveEvents: LiveEventEntry[] = [];
+  let personLabelStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
   let stateReloadInFlight = false;
   let stateReloadQueued = false;
   let configuredCameras: DiscoveredCamera[] = [];
@@ -82,6 +95,12 @@
   let historyTimelineElement: HTMLElement | null = null;
   let historyScrollFrame: number | null = null;
   let historyPlaybackCommitTimer: number | null = null;
+  let personSamples: PersonRecognitionSample[] = [];
+  let reviewablePersonSamples: PersonRecognitionSample[] = [];
+  let highConfidencePersonGroups: PersonTriageGroup[] = [];
+  let suggestedPersonGroups: PersonTriageGroup[] = [];
+  let unlabelledPersonSamples: PersonRecognitionSample[] = [];
+  let visiblePersonLabels: string[] = [];
   $: discoveryState = cameraSnapshot?.state ?? null;
   $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
@@ -115,6 +134,32 @@
       : selectedReviewEvent
         ? recordingQualityLabel(selectedReviewEvent)
         : 'no recording';
+  $: personSamples = discoveryState?.people?.samples ?? [];
+  $: reviewablePersonSamples = personSamples.filter(
+    (sample) =>
+      sample.status === 'analyzed' &&
+      sample.cropUrl &&
+      sample.cropVersion === reviewablePersonCropVersion &&
+      !sample.label &&
+      !sample.dismissedAtMs
+  );
+  $: highConfidencePersonGroups = groupPersonSamples(
+    reviewablePersonSamples.filter(
+      (sample) => sample.suggestedLabel && (sample.suggestedScore ?? 0) >= highConfidencePersonScore
+    ),
+    personSamples
+  );
+  $: suggestedPersonGroups = groupPersonSamples(
+    reviewablePersonSamples.filter((sample) => {
+      const score = sample.suggestedScore ?? 0;
+      return sample.suggestedLabel && score >= suggestedPersonScore && score < highConfidencePersonScore;
+    }),
+    personSamples
+  );
+  $: unlabelledPersonSamples = reviewablePersonSamples.filter(
+    (sample) => !sample.suggestedLabel || (sample.suggestedScore ?? 0) < suggestedPersonScore
+  );
+  $: visiblePersonLabels = discoveryState?.people.labels.filter((label) => !isAnonymousPersonLabel(label)) ?? [];
 
   onMount(() => {
     hydrated = true;
@@ -500,6 +545,11 @@
     const cameraId = typeof payload.cameraId === 'string' ? payload.cameraId : null;
     if (cameraId) {
       return cameraId;
+    }
+
+    const sampleId = typeof payload.sampleId === 'string' ? payload.sampleId : null;
+    if (sampleId) {
+      return sampleId;
     }
 
     const processId = typeof payload.processId === 'string' ? payload.processId : null;
@@ -888,13 +938,37 @@
   function historyGroupLabel(group: HistoryTimelineGroup) {
     const counts = new Map<string, number>();
     for (const event of group.events) {
-      counts.set(event.label, (counts.get(event.label) ?? 0) + 1);
+      const personLabel = historyPersonLabel(event);
+      counts.set(personLabel ?? event.label, (counts.get(personLabel ?? event.label) ?? 0) + 1);
     }
 
     return Array.from(counts.entries())
       .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
       .map(([label, count]) => (count > 1 ? `${label} x${count}` : label))
       .join(', ');
+  }
+
+  function historyPersonLabel(event: ReviewableSecurityEvent) {
+    const samples = personSamples.filter((sample) => sample.sourceEventId === event.sourceEventId);
+    const labeledSample = samples.find((sample) => sample.label && !isAnonymousPersonLabel(sample.label));
+    if (labeledSample?.label) {
+      return labeledSample.label;
+    }
+
+    const suggestedSample = samples
+      .filter(
+        (sample) =>
+          sample.suggestedLabel &&
+          !isAnonymousPersonLabel(sample.suggestedLabel) &&
+          (sample.suggestedScore ?? 0) >= historyPersonScore
+      )
+      .sort((left, right) => (right.suggestedScore ?? 0) - (left.suggestedScore ?? 0))[0];
+
+    if (!suggestedSample?.suggestedLabel || suggestedSample.suggestedScore === null) {
+      return null;
+    }
+
+    return `${personLabelDisplay(suggestedSample.suggestedLabel)} ${Math.round(suggestedSample.suggestedScore * 100)}%`;
   }
 
   function historyGroupQualityLabel(group: HistoryTimelineGroup) {
@@ -919,6 +993,11 @@
   }
 
   function historyEventThumbnailUrl(event: ReviewableSecurityEvent) {
+    const personCropUrl = personSamples.find((sample) => sample.sourceEventId === event.sourceEventId && sample.cropUrl)?.cropUrl;
+    if (personCropUrl) {
+      return personCropUrl;
+    }
+
     const segment = event.preferredSegment;
     if (!segment) {
       return null;
@@ -929,6 +1008,150 @@
       t: String(Math.max(0, Math.floor((event.occurredAtMs - segment.startMs) / 1000)))
     });
     return `/api/recordings/thumbnail?${params.toString()}`;
+  }
+
+  async function labelPersonSample(sample: PersonRecognitionSample, event: SubmitEvent) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+
+    const formData = new FormData(form);
+    const label = String(formData.get('label') ?? '').trim();
+    if (!label) {
+      return;
+    }
+
+    await labelPersonSamples([sample], label);
+    form.reset();
+  }
+
+  async function labelPersonSamples(samples: PersonRecognitionSample[], label: string) {
+    const sampleIds = samples.map((sample) => sample.id);
+    const normalizedLabel = label.trim();
+    if (sampleIds.length === 0 || !normalizedLabel) {
+      return;
+    }
+
+    personLabelStatus = {
+      ...personLabelStatus,
+      ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saving' as const, message: 'Saving label...' }]))
+    };
+
+    try {
+      const response = await fetch('/api/person-recognition/labels', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sampleIds,
+          label: normalizedLabel
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Label save failed with HTTP ${response.status}`);
+      }
+      setCameraSnapshotFromPayload(await response.json());
+      personLabelStatus = {
+        ...personLabelStatus,
+        ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saved' as const, message: `Labeled ${normalizedLabel}.` }]))
+      };
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      personLabelStatus = {
+        ...personLabelStatus,
+        ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'error' as const, message }]))
+      };
+    }
+  }
+
+  async function dismissPersonSample(sample: PersonRecognitionSample) {
+    personLabelStatus = {
+      ...personLabelStatus,
+      [sample.id]: { state: 'saving', message: 'Dismissing...' }
+    };
+
+    try {
+      const response = await fetch('/api/person-recognition/dismiss', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sampleId: sample.id })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Dismiss failed with HTTP ${response.status}`);
+      }
+      setCameraSnapshotFromPayload(await response.json());
+      personLabelStatus = {
+        ...personLabelStatus,
+        [sample.id]: { state: 'saved', message: 'Assigned anonymous identity.' }
+      };
+    } catch (caught) {
+      personLabelStatus = {
+        ...personLabelStatus,
+        [sample.id]: {
+          state: 'error',
+          message: caught instanceof Error ? caught.message : String(caught)
+        }
+      };
+    }
+  }
+
+  function groupPersonSamples(samples: PersonRecognitionSample[], allSamples: PersonRecognitionSample[]): PersonTriageGroup[] {
+    const grouped = new Map<string, PersonRecognitionSample[]>();
+    for (const sample of samples) {
+      if (!sample.suggestedLabel) {
+        continue;
+      }
+      grouped.set(sample.suggestedLabel, [...(grouped.get(sample.suggestedLabel) ?? []), sample]);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([label, groupedSamples]) => ({
+        key: label,
+        label,
+        displayLabel: personLabelDisplay(label),
+        samples: groupedSamples.sort(
+          (left, right) => (right.suggestedScore ?? 0) - (left.suggestedScore ?? 0) || right.occurredAtMs - left.occurredAtMs
+        ),
+        references: personReferenceSamples(label, allSamples)
+      }))
+      .sort((left, right) => right.samples.length - left.samples.length || left.label.localeCompare(right.label));
+  }
+
+  function personReferenceSamples(label: string, allSamples: PersonRecognitionSample[]) {
+    return allSamples
+      .filter((sample) => sample.label === label && sample.status === 'analyzed' && sample.cropUrl)
+      .sort((left, right) => (right.labeledAtMs ?? 0) - (left.labeledAtMs ?? 0) || right.occurredAtMs - left.occurredAtMs)
+      .slice(0, 8);
+  }
+
+  function isAnonymousPersonLabel(label: string | null | undefined) {
+    return Boolean(label?.startsWith('anonymous:'));
+  }
+
+  function personLabelDisplay(label: string | null | undefined) {
+    if (!label) {
+      return 'Unknown person';
+    }
+    if (!isAnonymousPersonLabel(label)) {
+      return label;
+    }
+
+    return `GUID ${label.replace(/^anonymous:/, '').slice(0, 8)}`;
+  }
+
+  function personSuggestion(sample: PersonRecognitionSample) {
+    if (!sample.suggestedLabel || sample.suggestedScore === null) {
+      return null;
+    }
+
+    return `${personLabelDisplay(sample.suggestedLabel)} (${Math.round(sample.suggestedScore * 100)}%)`;
+  }
+
+  function personCorrectionValue(sample: PersonRecognitionSample) {
+    return isAnonymousPersonLabel(sample.suggestedLabel) ? '' : sample.suggestedLabel ?? '';
   }
 
   function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
@@ -1058,6 +1281,8 @@
       <h1>
         {activeTab === 'cameras'
           ? 'Cameras'
+          : activeTab === 'people'
+            ? 'People'
           : activeTab === 'history'
             ? 'History'
             : activeTab === 'settings'
@@ -1109,6 +1334,232 @@
           <p>Use Settings to discover cameras and save credentials before live views appear here.</p>
           <button type="button" disabled={!hydrated} onclick={() => (activeTab = 'settings')}>Open Settings</button>
         </section>
+      {/if}
+    </section>
+  {:else if activeTab === 'people'}
+    <section class="view" aria-labelledby="people-title">
+      <div class="section-header">
+        <div>
+          <h2 id="people-title">Person Recognition</h2>
+          <p>Review high-resolution crops captured from camera-side person events and label unknown people.</p>
+          <p class="event-path">Labels and samples append to <code>.patrol/events/cameras-YYYY-MM-DD.jsonl</code>.</p>
+        </div>
+      </div>
+
+      {#if discoveryState?.people}
+        <div class="people-summary" data-testid="people-summary">
+          <div>
+            <span>Unknown</span>
+            <strong>{reviewablePersonSamples.length}</strong>
+          </div>
+          <div>
+            <span>Labeled</span>
+            <strong>{discoveryState.people.labeledCount}</strong>
+          </div>
+          <div>
+            <span>Known names</span>
+            <strong>{visiblePersonLabels.length}</strong>
+          </div>
+        </div>
+
+        {#if reviewablePersonSamples.length > 0}
+          <div class="person-triage" aria-label="Person recognition triage">
+            {#each highConfidencePersonGroups as group}
+              <section class="person-group" aria-label={`High confidence ${group.displayLabel} samples`}>
+                <div class="person-group-header">
+                  <div>
+                    <h3>Recognized as {group.displayLabel}</h3>
+                    <p>{group.samples.length} sample{group.samples.length === 1 ? '' : 's'} above 80% confidence.</p>
+                  </div>
+                  <button type="button" class="secondary" onclick={() => labelPersonSamples(group.samples, group.label)}>
+                    Accept all
+                  </button>
+                </div>
+                {#if group.references.length > 0}
+                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+                    {#each group.references as reference}
+                      <img
+                        src={reference.cropUrl}
+                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+                <ol class="person-grid" aria-label={`Recognized as ${group.displayLabel}`}>
+                  {#each group.samples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img src={sample.cropUrl} alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`} />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>{group.displayLabel}</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p class="suggestion">Suggested {personSuggestion(sample)}</p>
+                        </div>
+                        <div class="person-card-actions">
+                          <button type="button" class="secondary" onclick={() => labelPersonSamples([sample], group.label)}>
+                            Accept
+                          </button>
+                          <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Correct label</span>
+                            <input
+                              name="label"
+                              list="known-person-labels"
+                              value={personCorrectionValue(sample)}
+                              autocomplete="off"
+                              required
+                            />
+                          </label>
+                          <button type="submit" class="secondary">Save correction</button>
+                        </form>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/each}
+
+            {#each suggestedPersonGroups as group}
+              <section class="person-group" aria-label={`Suggested ${group.displayLabel} samples`}>
+                <div class="person-group-header">
+                  <div>
+                    <h3>Suggested {group.displayLabel}</h3>
+                    <p>{group.samples.length} sample{group.samples.length === 1 ? '' : 's'} between 30% and 80% confidence.</p>
+                  </div>
+                  <button type="button" class="secondary" onclick={() => labelPersonSamples(group.samples, group.label)}>
+                    Label all {group.displayLabel}
+                  </button>
+                </div>
+                {#if group.references.length > 0}
+                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+                    {#each group.references as reference}
+                      <img
+                        src={reference.cropUrl}
+                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+                <ol class="person-grid" aria-label={`Suggested ${group.displayLabel}`}>
+                  {#each group.samples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img src={sample.cropUrl} alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`} />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>{group.displayLabel}</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p class="suggestion">Suggested {personSuggestion(sample)}</p>
+                        </div>
+                        <div class="person-card-actions">
+                          <button type="button" class="secondary" onclick={() => labelPersonSamples([sample], group.label)}>
+                            Accept
+                          </button>
+                          <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Correct label</span>
+                            <input
+                              name="label"
+                              list="known-person-labels"
+                              value={personCorrectionValue(sample)}
+                              autocomplete="off"
+                              required
+                            />
+                          </label>
+                          <button type="submit" class="secondary">Save correction</button>
+                        </form>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/each}
+
+            {#if unlabelledPersonSamples.length > 0}
+              <section class="person-group" aria-label="Unlabelled person samples">
+                <div class="person-group-header">
+                  <div>
+                    <h3>Unlabelled</h3>
+                    <p>{unlabelledPersonSamples.length} sample{unlabelledPersonSamples.length === 1 ? '' : 's'} with no useful match yet.</p>
+                  </div>
+                </div>
+                <ol class="person-grid" aria-label="Unlabelled person samples">
+                  {#each unlabelledPersonSamples as sample}
+                    <li class="person-card" data-testid="person-sample-card">
+                      <img src={sample.cropUrl} alt={`Person sample from ${formatDateTime(sample.occurredAtMs)}`} />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>Unknown person</h4>
+                          <p>
+                            {cameraById(sample.cameraId)?.name ?? cameraById(sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(sample.occurredAtMs)}
+                          </p>
+                          <p>Start labeling here; similar samples will move into suggested groups.</p>
+                        </div>
+                        <form class="person-label-form" onsubmit={(event) => labelPersonSample(sample, event)}>
+                          <label>
+                            <span>Label this person</span>
+                            <input name="label" list="known-person-labels" autocomplete="off" required />
+                          </label>
+                          <button type="submit" class="secondary">Save label</button>
+                        </form>
+                        <button type="button" class="secondary" onclick={() => dismissPersonSample(sample)}>Dismiss</button>
+                        {#if personLabelStatus[sample.id]}
+                          <p
+                            class:error={personLabelStatus[sample.id].state === 'error'}
+                            class:success={personLabelStatus[sample.id].state === 'saved'}
+                            class="credential-status"
+                            role="status"
+                          >
+                            {personLabelStatus[sample.id].message}
+                          </p>
+                        {/if}
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/if}
+          </div>
+          <datalist id="known-person-labels">
+            {#each visiblePersonLabels as label}
+              <option value={label}></option>
+            {/each}
+          </datalist>
+        {:else}
+          <p class="notice">No current person crops are ready for review. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
+        {/if}
+      {:else}
+        <p class="notice">Person recognition state has not been replayed yet.</p>
       {/if}
     </section>
   {:else if activeTab === 'history'}
@@ -1608,6 +2059,21 @@
   </button>
   <button
     type="button"
+    class:active={activeTab === 'people'}
+    aria-label="People"
+    aria-current={activeTab === 'people' ? 'page' : undefined}
+    data-testid="tab-people"
+    disabled={!hydrated}
+    onclick={() => (activeTab = 'people')}
+  >
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="8" r="4"></circle>
+      <path d="M5 21a7 7 0 0 1 14 0"></path>
+    </svg>
+    <span>People</span>
+  </button>
+  <button
+    type="button"
     class:active={activeTab === 'history'}
     aria-label="History"
     aria-current={activeTab === 'history' ? 'page' : undefined}
@@ -1946,6 +2412,141 @@
 
   .storage-summary strong {
     font-size: 1rem;
+  }
+
+  .people-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .people-summary div {
+    display: grid;
+    gap: 4px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 12px;
+  }
+
+  .people-summary span {
+    color: #66727f;
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .people-summary strong {
+    font-size: 1.05rem;
+  }
+
+  .person-triage {
+    display: grid;
+    gap: 14px;
+  }
+
+  .person-group {
+    display: grid;
+    gap: 12px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 14px;
+  }
+
+  .person-group-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .person-group-header h3,
+  .person-group-header p {
+    margin-bottom: 0;
+  }
+
+  .person-group-header p,
+  .person-card p {
+    color: #66727f;
+    line-height: 1.4;
+  }
+
+  .person-reference-strip {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .person-reference-strip img {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 auto;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    object-fit: contain;
+    background: #f6f8fa;
+  }
+
+  .person-grid {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .person-card {
+    display: grid;
+    grid-template-columns: minmax(96px, 32%) minmax(0, 1fr);
+    gap: 12px;
+    border: 1px solid #e2e5e9;
+    border-radius: 8px;
+    background: #f9fafb;
+    padding: 10px;
+  }
+
+  .person-card > img {
+    width: 100%;
+    max-height: 180px;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    object-fit: contain;
+    background: #eef2f5;
+  }
+
+  .person-card-body {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .person-card h4,
+  .person-card p {
+    margin-bottom: 0;
+  }
+
+  .person-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .person-label-form {
+    display: grid;
+    gap: 8px;
+  }
+
+  .person-label-form button,
+  .person-card-actions button {
+    min-width: 0;
+  }
+
+  .suggestion {
+    color: #1f4f82;
+    font-weight: 750;
   }
 
   .history-camera-selector {
@@ -2508,7 +3109,7 @@
     left: 0;
     z-index: 10;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 4px;
     border-top: 1px solid #d5d8dc;
     background: rgb(255 255 255 / 0.96);

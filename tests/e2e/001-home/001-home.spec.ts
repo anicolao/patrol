@@ -10,6 +10,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     processes: systemProcesses(fixedNowMs - 15000),
     devices: [],
     recordings: emptyRecordings(),
+    people: emptyPeople(),
     errors: [],
     lastDiscovery: null
   };
@@ -25,6 +26,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     staleAfterMs: 60 * 60 * 1000,
     processes: systemProcesses(fixedNowMs - 15000),
     recordings: annke ? recordingState(fixedNowMs - 4000) : emptyRecordings(),
+    people: emptyPeople(),
     errors: [],
     lastDiscovery: {
       runId: 'discovery-run-1',
@@ -268,6 +270,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByTestId('tab-cameras')).toHaveAttribute('aria-current', 'page');
           await expect(page.getByTestId('tab-settings')).toBeVisible();
           await expect(page.getByTestId('tab-settings')).toBeEnabled();
+          await expect(page.getByTestId('tab-people')).toBeVisible();
+          await expect(page.getByTestId('tab-people')).toBeEnabled();
           await expect(page.getByTestId('tab-history')).toBeVisible();
           await expect(page.getByTestId('tab-history')).toBeEnabled();
           await expect(page.getByTestId('tab-health')).toBeVisible();
@@ -421,7 +425,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('6/6 green');
+          await expect(page.getByTestId('process-score')).toHaveText('7/7 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -434,7 +438,8 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('Annke alert worker')).toBeVisible();
           await expect(page.getByText('Watchdog cron')).toBeVisible();
           await expect(page.getByText('Recording worker')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(6);
+          await expect(page.getByText('Person recognition worker')).toBeVisible();
+          await expect(page.getByTestId('process-row')).toHaveCount(7);
         }
       },
       {
@@ -673,11 +678,13 @@ test('cached snapshot boots quickly and reconciles server state', async ({ page 
             usernameSecretId: 'camera.uuid:driveway-camera.username',
             passwordSecretId: 'camera.uuid:driveway-camera.password'
           },
+          controls: emptyControls(),
           go2rtc: configuredGo2rtc(fixedNowMs - 20000),
           annke: null
         }
       ],
       recordings: emptyRecordings(),
+      people: emptyPeople(),
       errors: [],
       lastDiscovery: {
         runId: 'cached-discovery',
@@ -718,6 +725,7 @@ test('cached snapshot boots quickly and reconciles server state', async ({ page 
         usernameSecretId: 'camera.uuid:garage-camera.username',
         passwordSecretId: 'camera.uuid:garage-camera.password'
       },
+      controls: emptyControls(),
       go2rtc: configuredGo2rtc(fixedNowMs - 15000),
       annke: null
     }
@@ -985,6 +993,29 @@ function emptyRecordings(): CameraDiscoveryState['recordings'] {
   };
 }
 
+function emptyPeople(): CameraDiscoveryState['people'] {
+  return {
+    samples: [],
+    labels: [],
+    unlabeledCount: 0,
+    labeledCount: 0
+  };
+}
+
+function emptyControls(): DiscoveredCamera['controls'] {
+  return {
+    ptz: {
+      supported: false,
+      continuous: false
+    },
+    supplementLight: {
+      supported: false,
+      modes: []
+    },
+    inferredFrom: null
+  };
+}
+
 function recordingState(eventAtMs: number): CameraDiscoveryState['recordings'] {
   const segment = {
     cameraId: 'uuid:driveway-camera',
@@ -1092,6 +1123,17 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Records main and sub streams into retained video segments'
+    },
+    {
+      id: 'patrol-person-recognizer',
+      label: 'Person recognition worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
+      health: 'ok',
+      detail: 'Analyzes camera-side person events and manages person crops'
     }
   ];
 }
