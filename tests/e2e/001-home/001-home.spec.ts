@@ -55,6 +55,17 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           sub: 'driveway_sub'
         },
         credentials,
+        controls: {
+          ptz: {
+            supported: false,
+            continuous: false
+          },
+          supplementLight: {
+            supported: false,
+            modes: []
+          },
+          inferredFrom: null
+        },
         go2rtc: go2rtc ?? null,
         annke: annke ?? null
       }

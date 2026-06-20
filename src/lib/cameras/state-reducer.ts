@@ -1,6 +1,7 @@
 import type {
   AnnkeAiHealth,
   AnnkeCameraAiStatus,
+  CameraControlStatus,
   CameraDiscoveryRawResult,
   CameraDiscoveryState,
   DiscoveredCamera,
@@ -103,6 +104,29 @@ interface SystemProcessHeartbeatPayload {
   host: string | null;
   gitRevision: string | null;
   detail: string | null;
+}
+
+export interface CameraControlRequestedPayload {
+  cameraId: string;
+  host: string;
+  control: 'ptz' | 'supplement_light';
+  command: string;
+  parameters: Record<string, string | number | boolean | null>;
+}
+
+export interface CameraControlCompletedPayload extends CameraControlRequestedPayload {
+  rawResult: {
+    startedAtMs: number;
+    durationMs: number;
+    ok: boolean;
+    statusCode: number | null;
+    body: string | null;
+    error: string | null;
+  };
+}
+
+export interface CameraControlFailedPayload extends CameraControlRequestedPayload {
+  error: string;
 }
 
 export interface Go2rtcConfiguredStream {
@@ -296,6 +320,7 @@ export function reduceCameraDiscoveryEvents(
       devicesById.set(device.id, {
         ...device,
         credentials: existing?.credentials ?? null,
+        controls: existing?.controls ?? device.controls,
         go2rtc: existing?.go2rtc ?? null,
         annke: existing?.annke ?? null
       });
@@ -1193,8 +1218,28 @@ function parseProbeResponse(response: RawProbeResponse): DiscoveredCamera {
     vendorHint: inferVendor(scopes, xaddrs),
     streams: streamNames(scopes, response.remoteAddress, id),
     credentials: null,
+    controls: inferCameraControls({
+      name: scopeValue(scopes, '/name/'),
+      hardware: scopeValue(scopes, '/hardware/')
+    }),
     go2rtc: null,
     annke: null
+  };
+}
+
+function inferCameraControls(camera: { name: string | null; hardware: string | null }): CameraControlStatus {
+  const model = `${camera.name ?? ''} ${camera.hardware ?? ''}`.toLowerCase();
+  const isAnnkePtz = model.includes('i91ep');
+  return {
+    ptz: {
+      supported: isAnnkePtz,
+      continuous: isAnnkePtz
+    },
+    supplementLight: {
+      supported: isAnnkePtz,
+      modes: isAnnkePtz ? ['close', 'eventIntelligence', 'colorVuWhiteLight', 'irLight'] : []
+    },
+    inferredFrom: isAnnkePtz ? 'annke-i91ep-model' : null
   };
 }
 

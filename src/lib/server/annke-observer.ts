@@ -59,14 +59,23 @@ export async function digestFetch(input: {
   username: string;
   password: string;
   method?: string;
+  headers?: HeadersInit;
+  body?: BodyInit | null;
+  signal?: AbortSignal;
   timeoutMs?: number;
 }) {
   const method = input.method ?? 'GET';
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), input.timeoutMs ?? 10_000);
+  const controller = input.signal ? null : new AbortController();
+  const signal = input.signal ?? controller?.signal;
+  const timeout = controller ? setTimeout(() => controller.abort(), input.timeoutMs ?? 10_000) : null;
 
   try {
-    const first = await fetch(input.url, { method, signal: controller.signal });
+    const first = await fetch(input.url, {
+      method,
+      headers: input.headers,
+      body: input.body,
+      signal
+    });
     if (first.status !== 401) {
       return first;
     }
@@ -87,11 +96,17 @@ export async function digestFetch(input: {
 
     return await fetch(input.url, {
       method,
-      headers: { authorization },
-      signal: controller.signal
+      headers: {
+        ...headersToRecord(input.headers),
+        authorization
+      },
+      body: input.body,
+      signal
     });
   } finally {
-    clearTimeout(timeout);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -158,4 +173,20 @@ function requiredDigestValue(digest: Record<string, string>, key: string) {
 
 function md5(value: string) {
   return createHash('md5').update(value).digest('hex');
+}
+
+function headersToRecord(headers: HeadersInit | undefined): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers);
+  }
+
+  return headers;
 }

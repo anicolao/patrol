@@ -20,8 +20,21 @@ export interface DiscoveredCamera {
     usernameSecretId: string;
     passwordSecretId: string;
   } | null;
+  controls: CameraControlStatus;
   go2rtc: Go2rtcCameraStatus | null;
   annke: AnnkeCameraAiStatus | null;
+}
+
+export interface CameraControlStatus {
+  ptz: {
+    supported: boolean;
+    continuous: boolean;
+  };
+  supplementLight: {
+    supported: boolean;
+    modes: string[];
+  };
+  inferredFrom: string | null;
 }
 
 export type RecordingStreamRole = 'main' | 'sub';

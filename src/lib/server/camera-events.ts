@@ -3,6 +3,9 @@ import {
   type AnnkeAiObservationRequestedPayload,
   type AnnkeAlertStreamMessageReceivedPayload,
   type AnnkeIsapiResponseObservedPayload,
+  type CameraControlCompletedPayload,
+  type CameraControlFailedPayload,
+  type CameraControlRequestedPayload,
   type CameraCredentialsSavedPayload,
   type DiscoveryCompletedPayload,
   type DiscoveryInitiatedPayload,
@@ -42,6 +45,30 @@ export async function appendDiscoveryCompleted(runId: string, rawResult: CameraD
 export async function appendCameraCredentialsSaved(payload: CameraCredentialsSavedPayload) {
   return await appendEvent<CameraCredentialsSavedPayload>(CAMERA_STREAM, {
     type: 'camera.credentials.saved',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendCameraControlRequested(payload: CameraControlRequestedPayload) {
+  return await appendEvent<CameraControlRequestedPayload>(CAMERA_STREAM, {
+    type: 'camera.control.requested',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendCameraControlCompleted(payload: CameraControlCompletedPayload) {
+  return await appendEvent<CameraControlCompletedPayload>(CAMERA_STREAM, {
+    type: 'camera.control.completed',
+    source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendCameraControlFailed(payload: CameraControlFailedPayload) {
+  return await appendEvent<CameraControlFailedPayload>(CAMERA_STREAM, {
+    type: 'camera.control.failed',
     source: 'patrol-web',
     payload
   });
