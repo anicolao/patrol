@@ -35,7 +35,8 @@ const refs = git([
   .filter(Boolean)
   .map(parseRefLine)
   .filter((ref) => !protectedRefNames.has(ref.shortName))
-  .filter((ref) => !ref.shortName.endsWith('/HEAD'));
+  .filter((ref) => !ref.shortName.endsWith('/HEAD'))
+  .filter((ref) => !ref.fullName.endsWith('/HEAD'));
 
 const results = refs.map(classifyRef);
 const deletable = results.filter((result) => result.deleteSafe);
@@ -105,6 +106,10 @@ function deleteRef(ref) {
 
   const [remote, ...branchParts] = ref.shortName.split('/');
   const branch = branchParts.join('/');
+  if (!branch) {
+    console.log(`skipped ${ref.shortName}: remote root/HEAD alias has no branch name`);
+    return;
+  }
   if (!deleteRemotes.includes(remote)) {
     console.log(`skipped ${ref.shortName}: remote ${remote} is not in --delete-remotes`);
     return;
