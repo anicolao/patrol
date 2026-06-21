@@ -37,13 +37,32 @@
     id: string;
     timeMs: number;
     label: string;
+    major: boolean;
+  };
+  type HistoryTimelineSegment = {
+    id: string;
+    cameraId: string;
+    role: 'main' | 'sub';
+    startMs: number;
+    endMs: number;
+    segment: RecordingSegment;
   };
   type HistoryTimeline = {
     startMs: number;
     endMs: number;
     heightPx: number;
     groups: HistoryTimelineGroup[];
+    segments: HistoryTimelineSegment[];
     ticks: HistoryTimelineTick[];
+  };
+  type HistoryCameraPlayback = {
+    camera: DiscoveredCamera;
+    previewSegment: RecordingSegment | null;
+    playbackSegment: RecordingSegment | null;
+    previewThumbnailUrl: string | null;
+    playbackSource: string | null;
+    previewQuality: string;
+    playbackQuality: string;
   };
   type PersonTriageGroup = {
     key: string;
@@ -69,8 +88,8 @@
 
   const liveEventPort = '5186';
   const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
-  const historyTimelinePixelsPerMinute = 18;
-  const historyTimelineBucketMs = 5 * 60 * 1000;
+  const historyTimelinePixelsPerMinute = 24;
+  const historyTimelineBucketMs = 2 * 60 * 1000;
   const historyTimelinePaddingPx = 168;
   const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
   const reviewablePersonCropVersion = 'motion-diff-v3';
@@ -100,12 +119,10 @@
   let processGreenCount = 0;
   let allProcessesGreen = false;
   let selectedReviewEvent: ReviewableSecurityEvent | null = null;
-  let selectedHistoryCameraId: string | null = null;
   let selectedHistoryTimeMs: number | null = null;
   let playbackHistoryTimeMs: number | null = null;
-  let selectedRecordingSource: string | null = null;
-  let selectedRecordingQuality = 'no recording';
   let historyEvents: ReviewableSecurityEvent[] = [];
+  let historyCameraPlaybacks: HistoryCameraPlayback[] = [];
   let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
   let historyTimelineElement: HTMLElement | null = null;
   let historyScrollFrame: number | null = null;
@@ -124,9 +141,7 @@
   $: allProcessesGreen =
     (discoveryState?.processes.length ?? 0) > 0 &&
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
-  $: historyEvents = selectedHistoryCameraId
-    ? (discoveryState?.recordings.events ?? []).filter((event) => event.cameraId === selectedHistoryCameraId)
-    : (discoveryState?.recordings.events ?? []);
+  $: historyEvents = discoveryState?.recordings.events ?? [];
   $: if (selectedHistoryTimeMs === null) {
     const defaultReviewEvent = historyEvents.find((event) => event.preferredSegment);
     if (defaultReviewEvent) {
@@ -138,19 +153,13 @@
   $: selectedReviewEvent = selectedReviewEventId
     ? (historyEvents.find((event) => event.id === selectedReviewEventId) ?? null)
     : null;
-  $: historyTimeline = buildHistoryTimeline(historyEvents);
-  $: selectedRecordingSource =
-    playbackHistoryTimeMs !== null
-      ? recordingSourceForTime(discoveryState?.recordings.segments ?? [], playbackHistoryTimeMs)
-      : selectedReviewEvent
-        ? recordingSource(selectedReviewEvent)
-        : null;
-  $: selectedRecordingQuality =
-    playbackHistoryTimeMs !== null
-      ? recordingQualityLabelForTime(discoveryState?.recordings.segments ?? [], playbackHistoryTimeMs)
-      : selectedReviewEvent
-        ? recordingQualityLabel(selectedReviewEvent)
-        : 'no recording';
+  $: historyTimeline = buildHistoryTimeline(historyEvents, discoveryState?.recordings.segments ?? []);
+  $: historyCameraPlaybacks = buildHistoryCameraPlaybacks(
+    configuredCameras,
+    discoveryState?.recordings.segments ?? [],
+    selectedHistoryTimeMs,
+    playbackHistoryTimeMs
+  );
   $: personSamples = discoveryState?.people?.samples ?? [];
   $: reviewablePersonSamples = personSamples.filter(
     (sample) =>
@@ -553,26 +562,27 @@
   function ensureHistorySelection(state: CameraDiscoveryState) {
     const credentialedCameras = state.devices.filter((camera) => camera.credentials);
     if (credentialedCameras.length === 0) {
-      selectedHistoryCameraId = null;
       selectedReviewEventId = null;
       selectedHistoryTimeMs = null;
       playbackHistoryTimeMs = null;
       return;
     }
 
-    if (!selectedHistoryCameraId || !credentialedCameras.some((camera) => camera.id === selectedHistoryCameraId)) {
-      const defaultReviewEvent = state.recordings.events.find((event) => event.preferredSegment);
-      selectedHistoryCameraId = defaultReviewEvent?.cameraId ?? credentialedCameras[0].id;
-    }
-
     if (selectedHistoryTimeMs === null) {
-      const defaultReviewEvent = state.recordings.events.find(
-        (event) => event.cameraId === selectedHistoryCameraId && event.preferredSegment
-      );
+      const defaultReviewEvent = state.recordings.events.find((event) => event.preferredSegment);
       if (defaultReviewEvent) {
         selectedReviewEventId = defaultReviewEvent.id;
         selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
         playbackHistoryTimeMs = defaultReviewEvent.occurredAtMs;
+        return;
+      }
+
+      const latestSegment = [...state.recordings.segments].sort(
+        (left, right) => right.endMs - left.endMs || left.relativePath.localeCompare(right.relativePath)
+      )[0];
+      if (latestSegment) {
+        selectedHistoryTimeMs = Math.max(latestSegment.startMs, latestSegment.endMs - 1000);
+        playbackHistoryTimeMs = selectedHistoryTimeMs;
       }
     }
   }
@@ -682,14 +692,6 @@
 
   function cameraById(cameraId: string) {
     return discoveryState?.devices.find((camera) => camera.id === cameraId) ?? null;
-  }
-
-  function selectedHistoryCamera() {
-    return selectedHistoryCameraId ? cameraById(selectedHistoryCameraId) : null;
-  }
-
-  function historyCameraEventCount(cameraId: string) {
-    return (discoveryState?.recordings.events ?? []).filter((event) => event.cameraId === cameraId).length;
   }
 
   function go2rtcStreamPath(camera: DiscoveredCamera, stream: 'main' | 'sub') {
@@ -807,7 +809,6 @@
 
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
-    selectedHistoryCameraId = event.cameraId;
     selectedHistoryTimeMs = event.occurredAtMs;
     commitHistoryPlayback(event.occurredAtMs);
     void centerHistoryTimelineTime(event.occurredAtMs);
@@ -824,23 +825,6 @@
     const event = group.events[0] ?? null;
     if (event) {
       selectReviewEvent(event);
-    }
-  }
-
-  function selectHistoryCamera(cameraId: string) {
-    if (cameraId === selectedHistoryCameraId) {
-      return;
-    }
-
-    selectedHistoryCameraId = cameraId;
-    const event = (discoveryState?.recordings.events ?? []).find(
-      (candidate) => candidate.cameraId === cameraId && candidate.preferredSegment
-    );
-    selectedReviewEventId = event?.id ?? null;
-    selectedHistoryTimeMs = event?.occurredAtMs ?? selectedHistoryTimeMs;
-    if (selectedHistoryTimeMs !== null) {
-      commitHistoryPlayback(selectedHistoryTimeMs);
-      void centerHistoryTimelineTime(selectedHistoryTimeMs);
     }
   }
 
@@ -905,9 +889,6 @@
 
     const nearestEvent = nearestHistoryGroupForTime(timeMs)?.events[0] ?? null;
     selectedReviewEventId = nearestEvent?.id ?? null;
-    if (nearestEvent) {
-      selectedHistoryCameraId = nearestEvent.cameraId;
-    }
     scheduleHistoryPlaybackCommit(timeMs);
   }
 
@@ -928,23 +909,27 @@
       endMs: now,
       heightPx: historyTimelineHeight(historyTimelineMinimumDurationMs),
       groups: [],
+      segments: [],
       ticks: []
     };
   }
 
-  function buildHistoryTimeline(events: ReviewableSecurityEvent[]): HistoryTimeline {
+  function buildHistoryTimeline(events: ReviewableSecurityEvent[], segments: RecordingSegment[]): HistoryTimeline {
     const sortedEvents = [...events].sort(
       (left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id)
     );
 
-    if (sortedEvents.length === 0) {
+    if (sortedEvents.length === 0 && segments.length === 0) {
       return emptyHistoryTimeline();
     }
 
-    const latestMs = sortedEvents[0].occurredAtMs;
-    const earliestMs = sortedEvents.at(-1)?.occurredAtMs ?? latestMs;
-    const endMs = latestMs + 5 * 60 * 1000;
-    const startMs = Math.min(earliestMs - 5 * 60 * 1000, endMs - historyTimelineMinimumDurationMs);
+    const eventTimes = sortedEvents.map((event) => event.occurredAtMs);
+    const segmentStarts = segments.map((segment) => segment.startMs);
+    const segmentEnds = segments.map((segment) => segment.endMs);
+    const latestMs = Math.max(...eventTimes, ...segmentEnds);
+    const earliestMs = Math.min(...eventTimes, ...segmentStarts);
+    const endMs = latestMs + 60 * 1000;
+    const startMs = Math.min(earliestMs - 60 * 1000, endMs - historyTimelineMinimumDurationMs);
     const heightPx = historyTimelineHeight(endMs - startMs);
     const groupsByBucket = new Map<number, ReviewableSecurityEvent[]>();
 
@@ -972,6 +957,16 @@
       endMs,
       heightPx,
       groups,
+      segments: segments
+        .map((segment) => ({
+          id: segment.relativePath,
+          cameraId: segment.cameraId,
+          role: segment.role,
+          startMs: segment.startMs,
+          endMs: segment.endMs,
+          segment
+        }))
+        .sort((left, right) => right.endMs - left.endMs || left.id.localeCompare(right.id)),
       ticks: historyTimelineTicks(startMs, endMs)
     };
   }
@@ -993,8 +988,18 @@
   function historyTimelineGroupStyle(group: HistoryTimelineGroup) {
     const top = historyTimelineYForTime(group.timeMs);
     const durationHeight = (Math.max(historyTimelineBucketMs, group.endMs - group.startMs) / 60000) * historyTimelinePixelsPerMinute;
-    const height = Math.max(72, Math.min(132, durationHeight));
+    const height = Math.max(48, Math.min(104, durationHeight));
     return `top: ${top}px; min-height: ${height}px;`;
+  }
+
+  function historyTimelineSegmentStyle(segment: HistoryTimelineSegment) {
+    const cameraIndex = Math.max(0, configuredCameras.findIndex((camera) => camera.id === segment.cameraId));
+    const laneWidth = 7;
+    const laneGap = 3;
+    const left = 76 + cameraIndex * (laneWidth + laneGap);
+    const top = historyTimelineYForTime(segment.endMs);
+    const height = Math.max(2, historyTimelineYForTime(segment.startMs) - top);
+    return `top: ${top}px; left: ${left}px; width: ${laneWidth}px; height: ${height}px;`;
   }
 
   function historyTimelineTickStyle(tick: HistoryTimelineTick) {
@@ -1003,20 +1008,23 @@
 
   function historyTimelineTicks(startMs: number, endMs: number): HistoryTimelineTick[] {
     const durationMs = endMs - startMs;
-    const stepMs =
+    const majorStepMs =
       durationMs > 24 * 60 * 60 * 1000
-        ? 24 * 60 * 60 * 1000
+        ? 6 * 60 * 60 * 1000
         : durationMs > 3 * 60 * 60 * 1000
-          ? 60 * 60 * 1000
-          : 15 * 60 * 1000;
-    const firstTickMs = Math.ceil(startMs / stepMs) * stepMs;
+          ? 30 * 60 * 1000
+          : 5 * 60 * 1000;
+    const minorStepMs = Math.max(60 * 1000, majorStepMs / 5);
+    const firstTickMs = Math.ceil(startMs / minorStepMs) * minorStepMs;
     const ticks: HistoryTimelineTick[] = [];
 
-    for (let timeMs = firstTickMs; timeMs <= endMs; timeMs += stepMs) {
+    for (let timeMs = firstTickMs; timeMs <= endMs; timeMs += minorStepMs) {
+      const major = timeMs % majorStepMs === 0;
       ticks.push({
         id: `tick-${timeMs}`,
         timeMs,
-        label: stepMs >= 24 * 60 * 60 * 1000 ? formatDate(timeMs) : formatTimelineTime(timeMs)
+        label: major ? (majorStepMs >= 24 * 60 * 60 * 1000 ? formatDate(timeMs) : formatTimelineTime(timeMs)) : '',
+        major
       });
     }
 
@@ -1099,6 +1107,35 @@
     return null;
   }
 
+  function historyGroupThumbnails(group: HistoryTimelineGroup) {
+    const seen = new Set<string>();
+    return group.events
+      .map((event) => {
+        const url = historyEventThumbnailUrl(event);
+        if (!url) {
+          return null;
+        }
+
+        const camera = cameraById(event.cameraId);
+        const label = `${camera?.name ?? camera?.remoteAddress ?? 'Unknown camera'} ${event.label}`;
+        return {
+          key: `${event.cameraId}:${url}`,
+          url,
+          label
+        };
+      })
+      .filter((thumbnail): thumbnail is { key: string; url: string; label: string } => Boolean(thumbnail))
+      .filter((thumbnail) => {
+        if (seen.has(thumbnail.key)) {
+          return false;
+        }
+        seen.add(thumbnail.key);
+        return true;
+      })
+      .sort((left, right) => left.label.localeCompare(right.label))
+      .slice(0, 6);
+  }
+
   function historyEventThumbnailUrl(event: ReviewableSecurityEvent) {
     const personCropUrl = personSamples.find((sample) => sample.sourceEventId === event.sourceEventId && sample.cropUrl)?.cropUrl;
     if (personCropUrl) {
@@ -1110,11 +1147,7 @@
       return null;
     }
 
-    const params = new URLSearchParams({
-      path: segment.relativePath,
-      t: String(Math.max(0, Math.floor((event.occurredAtMs - segment.startMs) / 1000)))
-    });
-    return `/api/recordings/thumbnail?${params.toString()}`;
+    return recordingThumbnailUrl(segment, event.occurredAtMs);
   }
 
   async function labelPersonSample(sample: PersonRecognitionSample, event: SubmitEvent) {
@@ -1341,35 +1374,6 @@
     return isAnonymousPersonLabel(sample.suggestedLabel) ? '' : sample.suggestedLabel ?? '';
   }
 
-  function recordingSegmentForTime(segments: RecordingSegment[], timeMs: number) {
-    const cameraId = selectedHistoryCameraId ?? selectedReviewEvent?.cameraId ?? configuredCameras[0]?.id ?? null;
-    const candidates = segments.filter(
-      (segment) => (!cameraId || segment.cameraId === cameraId) && timeMs >= segment.startMs && timeMs <= segment.endMs
-    );
-
-    return candidates.find((segment) => segment.role === 'main') ?? candidates.find((segment) => segment.role === 'sub') ?? null;
-  }
-
-  function recordingSourceForTime(segments: RecordingSegment[], timeMs: number) {
-    const segment = recordingSegmentForTime(segments, timeMs);
-    if (!segment) {
-      return null;
-    }
-
-    const params = new URLSearchParams({ path: segment.relativePath });
-    const offsetSeconds = Math.max(0, Math.floor((timeMs - segment.startMs) / 1000));
-    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
-  }
-
-  function recordingQualityLabelForTime(segments: RecordingSegment[], timeMs: number) {
-    const segment = recordingSegmentForTime(segments, timeMs);
-    if (!segment) {
-      return 'no recording';
-    }
-
-    return segment.role === 'main' ? 'full quality' : 'substream';
-  }
-
   function recordingSource(event: ReviewableSecurityEvent) {
     const segment = event.preferredSegment;
     if (!segment) {
@@ -1387,6 +1391,66 @@
     }
 
     return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
+  }
+
+  function buildHistoryCameraPlaybacks(
+    cameras: DiscoveredCamera[],
+    segments: RecordingSegment[],
+    previewTimeMs: number | null,
+    playbackTimeMs: number | null
+  ): HistoryCameraPlayback[] {
+    return cameras.map((camera) => {
+      const previewSegment = previewTimeMs === null ? null : recordingSegmentForCameraTime(segments, camera.id, previewTimeMs);
+      const playbackSegment = playbackTimeMs === null ? null : recordingSegmentForCameraTime(segments, camera.id, playbackTimeMs);
+      return {
+        camera,
+        previewSegment,
+        playbackSegment,
+        previewThumbnailUrl: previewSegment ? recordingThumbnailUrl(previewSegment, previewSegment.startMs) : null,
+        playbackSource: playbackSegment && playbackTimeMs !== null ? recordingSegmentSource(playbackSegment, playbackTimeMs) : null,
+        previewQuality: recordingQualityLabelForSegment(previewSegment),
+        playbackQuality: recordingQualityLabelForSegment(playbackSegment)
+      };
+    });
+  }
+
+  function recordingSegmentForCameraTime(segments: RecordingSegment[], cameraId: string, timeMs: number) {
+    const candidates = segments.filter(
+      (segment) => segment.cameraId === cameraId && timeMs >= segment.startMs && timeMs <= segment.endMs
+    );
+    return candidates.find((segment) => segment.role === 'main') ?? candidates.find((segment) => segment.role === 'sub') ?? null;
+  }
+
+  function recordingSegmentSource(segment: RecordingSegment, timeMs: number) {
+    const params = new URLSearchParams({ path: segment.relativePath });
+    const offsetSeconds = Math.max(0, Math.floor((timeMs - segment.startMs) / 1000));
+    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
+  }
+
+  function recordingThumbnailUrl(segment: RecordingSegment, timeMs: number) {
+    const params = new URLSearchParams({
+      path: segment.relativePath,
+      t: String(Math.max(0, Math.floor((timeMs - segment.startMs) / 1000)))
+    });
+    return `/api/recordings/thumbnail?${params.toString()}`;
+  }
+
+  function recordingQualityLabelForSegment(segment: RecordingSegment | null) {
+    if (!segment) {
+      return 'no recording';
+    }
+    return segment.role === 'main' ? 'full quality' : 'substream';
+  }
+
+  function selectedHistoryQualitySummary() {
+    const full = historyCameraPlaybacks.filter((playback) => playback.previewSegment?.role === 'main').length;
+    const sub = historyCameraPlaybacks.filter((playback) => playback.previewSegment?.role === 'sub').length;
+    const missing = historyCameraPlaybacks.length - full - sub;
+    return [
+      full > 0 ? `${full} full` : null,
+      sub > 0 ? `${sub} sub` : null,
+      missing > 0 ? `${missing} missing` : null
+    ].filter(Boolean).join(' · ') || 'no cameras';
   }
 
   function formatTimelineTime(tsMs: number) {
@@ -1855,59 +1919,66 @@
           </div>
         </div>
 
-        {#if discoveryState.recordings.events.length > 0}
-          {#if configuredCameras.length > 1}
-            <div class="history-camera-selector" aria-label="History camera">
-              {#each configuredCameras as camera}
-                <button
-                  type="button"
-                  class:active={camera.id === selectedHistoryCameraId}
-                  onclick={() => selectHistoryCamera(camera.id)}
-                >
-                  <strong>{displayName(camera)}</strong>
-                  <span>{historyCameraEventCount(camera.id)} events</span>
-                </button>
-              {/each}
-            </div>
-          {/if}
+        {#if discoveryState.recordings.events.length > 0 || discoveryState.recordings.segments.length > 0}
           <div class="history-workspace">
-            <section class="recording-player" aria-label="Selected event recording" data-testid="recording-player">
+            <section class="recording-player" aria-label="Synchronized camera recordings" data-testid="recording-player">
               <div class="recording-player-header">
                 <div>
                   {#if selectedReviewEvent}
                     {@const selectedEvent = selectedReviewEvent}
-                    <h3>{selectedEvent.label}</h3>
+                    <h3>{historyGroupLabel({ id: selectedEvent.id, startMs: selectedEvent.occurredAtMs, endMs: selectedEvent.occurredAtMs, timeMs: selectedEvent.occurredAtMs, events: [selectedEvent] })}</h3>
                     <p>
-                      {cameraById(selectedEvent.cameraId)?.name ?? cameraById(selectedEvent.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                      · {formatDateTime(selectedEvent.occurredAtMs)}
-                      · {selectedRecordingQuality}
+                      {formatDateTime(selectedEvent.occurredAtMs)}
+                      · {selectedHistoryQualitySummary()}
                     </p>
                   {:else if selectedHistoryTimeMs !== null}
                     <h3>Timeline position</h3>
                     <p>
-                      {selectedHistoryCamera()?.name ?? selectedHistoryCamera()?.remoteAddress ?? 'Unknown camera'}
-                      · {formatDateTime(selectedHistoryTimeMs)}
-                      · {selectedRecordingQuality}
+                      {formatDateTime(selectedHistoryTimeMs)}
+                      · {selectedHistoryQualitySummary()}
                     </p>
                   {/if}
                 </div>
               </div>
-              {#if selectedRecordingSource}
-                {#key selectedRecordingSource}
-                  <!-- svelte-ignore a11y_media_has_caption -->
-                  <video
-                    src={selectedRecordingSource}
-                    controls
-                    playsinline
-                    preload="metadata"
-                    data-testid="recording-video"
-                  ></video>
-                {/key}
-              {:else}
-                <p class="notice compact">
-                  No retained recording segment currently overlaps the playhead.
-                </p>
-              {/if}
+
+              <ul class="history-camera-playbacks" aria-label="Camera recordings at playhead">
+                {#each historyCameraPlaybacks as playback}
+                  <li class="history-camera-playback" data-quality={playback.previewSegment?.role ?? 'missing'}>
+                    <div class="history-camera-playback-header">
+                      <div>
+                        <h4>{displayName(playback.camera)}</h4>
+                        <p>{playback.camera.remoteAddress}</p>
+                      </div>
+                      <span>{playback.previewQuality}</span>
+                    </div>
+
+                    {#if playback.previewThumbnailUrl}
+                      <img
+                        class="history-scrub-preview"
+                        src={playback.previewThumbnailUrl}
+                        alt={`Preview frame from ${displayName(playback.camera)} at ${selectedHistoryTimeMs ? formatDateTime(selectedHistoryTimeMs) : 'the selected time'}`}
+                      />
+                    {:else}
+                      <div class="history-scrub-preview missing">No frame at playhead</div>
+                    {/if}
+
+                    {#if playback.playbackSource}
+                      {#key playback.playbackSource}
+                        <!-- svelte-ignore a11y_media_has_caption -->
+                        <video
+                          src={playback.playbackSource}
+                          controls
+                          playsinline
+                          preload="metadata"
+                          data-testid="recording-video"
+                        ></video>
+                      {/key}
+                    {:else}
+                      <p class="notice compact">No retained recording at the committed playhead.</p>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
             </section>
 
             <section class="history-timeline-panel" aria-label="Video history timeline">
@@ -1937,13 +2008,26 @@
                   role="presentation"
                   onclick={handleHistoryTimelineClick}
                 >
+                  {#each historyTimeline.segments as segment}
+                    <span
+                      class="history-availability-segment"
+                      data-role={segment.role}
+                      style={historyTimelineSegmentStyle(segment)}
+                      title={`${cameraById(segment.cameraId)?.name ?? segment.cameraId} ${segment.role} recording`}
+                    ></span>
+                  {/each}
                   {#each historyTimeline.ticks as tick}
-                    <div class="history-time-tick" style={historyTimelineTickStyle(tick)} aria-hidden="true">
+                    <div
+                      class:major={tick.major}
+                      class="history-time-tick"
+                      style={historyTimelineTickStyle(tick)}
+                      aria-hidden="true"
+                    >
                       <span>{tick.label}</span>
                     </div>
                   {/each}
                   {#each historyTimeline.groups as group}
-                    {@const groupThumbnailUrl = historyGroupThumbnailUrl(group)}
+                    {@const groupThumbnails = historyGroupThumbnails(group)}
                     <button
                       type="button"
                       class="history-event-group"
@@ -1958,8 +2042,10 @@
                       }}
                     >
                       <span class="history-event-thumb" aria-hidden="true">
-                        {#if groupThumbnailUrl}
-                          <img src={groupThumbnailUrl} alt="" loading="lazy" />
+                        {#if groupThumbnails.length > 0}
+                          {#each groupThumbnails as thumbnail}
+                            <img src={thumbnail.url} alt="" loading="lazy" title={thumbnail.label} />
+                          {/each}
                         {:else}
                           {historyGroupLabel(group).slice(0, 1)}
                         {/if}
@@ -2965,35 +3051,6 @@
     font-weight: 750;
   }
 
-  .history-camera-selector {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .history-camera-selector button {
-    display: grid;
-    gap: 2px;
-    justify-items: start;
-    border-color: #d9dde2;
-    background: #ffffff;
-    color: #171a1f;
-    padding: 10px 12px;
-    text-align: left;
-  }
-
-  .history-camera-selector button.active {
-    border-color: #1f4f82;
-    background: #f2f7fc;
-  }
-
-  .history-camera-selector span {
-    color: #66727f;
-    font-size: 0.82rem;
-    font-weight: 700;
-  }
-
   .recording-player {
     display: grid;
     gap: 12px;
@@ -3009,15 +3066,77 @@
   }
 
   .recording-player h3,
+  .recording-player h4,
   .recording-player p {
     margin-bottom: 0;
   }
 
-  .recording-player video {
+  .history-camera-playbacks {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .history-camera-playback {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #f9fafb;
+    padding: 10px;
+  }
+
+  .history-camera-playback[data-quality="main"] {
+    border-color: #9bc4ad;
+    background: #f7fcf9;
+  }
+
+  .history-camera-playback[data-quality="sub"] {
+    border-color: #dfc979;
+    background: #fffdf5;
+  }
+
+  .history-camera-playback-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .history-camera-playback-header span {
+    border: 1px solid #cbd1d8;
+    border-radius: 999px;
+    background: #ffffff;
+    padding: 3px 8px;
+    color: #3d4752;
+    font-size: 0.76rem;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .history-scrub-preview,
+  .history-camera-playback video {
     width: 100%;
     aspect-ratio: 16 / 9;
     border-radius: 6px;
     background: #111827;
+  }
+
+  .history-scrub-preview {
+    display: block;
+    border: 1px solid #d9dde2;
+    object-fit: contain;
+  }
+
+  .history-scrub-preview.missing {
+    display: grid;
+    place-items: center;
+    color: #cbd1d8;
+    font-size: 0.85rem;
+    font-weight: 800;
   }
 
   .history-workspace {
@@ -3086,6 +3205,22 @@
     content: '';
   }
 
+  .history-availability-segment {
+    position: absolute;
+    z-index: 1;
+    border-radius: 999px;
+    opacity: 0.78;
+    pointer-events: none;
+  }
+
+  .history-availability-segment[data-role="main"] {
+    background: #2f8c55;
+  }
+
+  .history-availability-segment[data-role="sub"] {
+    background: #c29b24;
+  }
+
   .history-playhead {
     position: sticky;
     top: 50%;
@@ -3118,8 +3253,12 @@
     position: absolute;
     right: 0;
     left: 0;
-    border-top: 1px solid #edf0f3;
+    border-top: 1px solid #f0f2f4;
     pointer-events: none;
+  }
+
+  .history-time-tick.major {
+    border-top-color: #cfd6dd;
   }
 
   .history-time-tick span {
@@ -3133,12 +3272,16 @@
     text-align: right;
   }
 
+  .history-time-tick:not(.major) span {
+    display: none;
+  }
+
   .history-event-group {
     position: absolute;
     right: 10px;
-    left: 82px;
+    left: 112px;
     display: grid;
-    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-columns: 64px minmax(0, 1fr);
     align-items: center;
     gap: 10px;
     margin: 0;
@@ -3158,9 +3301,10 @@
 
   .history-event-thumb {
     display: grid;
-    place-items: center;
-    width: 48px;
-    height: 48px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    place-items: stretch;
+    width: 60px;
+    height: 54px;
     overflow: hidden;
     border: 1px solid #d9dde2;
     border-radius: 6px;
@@ -3172,6 +3316,7 @@
   .history-event-thumb img {
     width: 100%;
     height: 100%;
+    min-width: 0;
     object-fit: cover;
   }
 
