@@ -172,6 +172,12 @@ export interface PersonRecognitionSampleDismissedPayload {
   sampleId: string;
 }
 
+export interface PersonRecognitionSuggestionsUpdatedPayload {
+  processedEventIds: string[];
+  sampleIds: string[];
+  updatedAtMs: number;
+}
+
 export interface Go2rtcConfiguredStream {
   cameraId: string;
   role: Go2rtcStreamRole;
@@ -526,6 +532,14 @@ function reduceCameraDiscoveryStateEvent(
         state,
         event as PatrolEvent<PersonRecognitionSampleDismissedPayload>
       );
+    case 'person.recognition.suggestions.updated':
+      return withProcessEvent(state, 'patrol-person-recognizer', {
+        tsMs: event.ts_ms,
+        eventType: event.type,
+        detail: 'Updated person recognition suggestions after labeling',
+        gitRevision: null,
+        healthOverride: null
+      });
     default:
       return state;
   }
@@ -1052,6 +1066,16 @@ function reduceSystemProcesses(
         tsMs: failed.ts_ms,
         eventType: failed.type,
         detail: failed.payload.error,
+        gitRevision: null,
+        healthOverride: null
+      });
+    }
+
+    if (event.type === 'person.recognition.suggestions.updated') {
+      updateProcessEvent(latestByProcessId, 'patrol-person-recognizer', {
+        tsMs: event.ts_ms,
+        eventType: event.type,
+        detail: 'Updated person recognition suggestions after labeling',
         gitRevision: null,
         healthOverride: null
       });

@@ -1,6 +1,5 @@
 import { json } from '@sveltejs/kit';
 import { appendPersonRecognitionSampleLabeled } from '$lib/server/camera-events';
-import { currentCameraStateSnapshot } from '$lib/server/state-cache';
 
 export async function POST({ request }) {
   const body = await request.json();
@@ -11,14 +10,20 @@ export async function POST({ request }) {
     return json({ error: 'sampleId or sampleIds and label are required.' }, { status: 400 });
   }
 
+  const events = [];
   for (const sampleId of sampleIds) {
-    await appendPersonRecognitionSampleLabeled({
-      sampleId,
-      label
-    });
+    events.push(
+      await appendPersonRecognitionSampleLabeled({
+        sampleId,
+        label
+      })
+    );
   }
 
-  return json(await currentCameraStateSnapshot({ forceRefresh: true }));
+  return json({
+    accepted: true,
+    events
+  });
 }
 
 function sampleIdsFromBody(value: unknown) {

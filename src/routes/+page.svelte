@@ -58,6 +58,14 @@
     count: number;
     references: PersonRecognitionSample[];
   };
+  type PersonProcessingQueueItem = {
+    sample: PersonRecognitionSample;
+    action: 'label' | 'dismiss';
+    label: string | null;
+    status: 'sending' | 'queued' | 'error';
+    message: string;
+    queuedAtMs: number;
+  };
 
   const liveEventPort = '5186';
   const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
@@ -85,6 +93,7 @@
   let liveEventUrl = '';
   let liveEvents: LiveEventEntry[] = [];
   let personLabelStatus: Record<string, { state: 'saving' | 'saved' | 'error'; message: string }> = {};
+  let personProcessingQueue: Record<string, PersonProcessingQueueItem> = {};
   let stateReloadInFlight = false;
   let stateReloadQueued = false;
   let configuredCameras: DiscoveredCamera[] = [];
@@ -108,6 +117,7 @@
   let unlabelledPersonSamples: PersonRecognitionSample[] = [];
   let visiblePersonLabels: string[] = [];
   let knownPersonGroups: KnownPersonGroup[] = [];
+  let processingPersonItems: PersonProcessingQueueItem[] = [];
   $: discoveryState = cameraSnapshot?.state ?? null;
   $: configuredCameras = (discoveryState?.devices ?? []).filter((camera) => camera.credentials);
   $: processGreenCount = (discoveryState?.processes ?? []).filter((process) => process.health === 'ok').length;
@@ -148,7 +158,8 @@
       sample.cropUrl &&
       sample.cropVersion === reviewablePersonCropVersion &&
       !sample.label &&
-      !sample.dismissedAtMs
+      !sample.dismissedAtMs &&
+      !personProcessingQueue[sample.id]
   );
   $: highConfidencePersonGroups = groupPersonSamples(
     reviewablePersonSamples.filter(
@@ -165,7 +176,7 @@
   );
   $: unlabelledPersonSamples = reviewablePersonSamples.filter(
     (sample) => !sample.suggestedLabel || (sample.suggestedScore ?? 0) < suggestedPersonScore
-  );
+  ).sort(comparePersonSamplesStable);
   $: visiblePersonLabels = discoveryState?.people.labels.filter((label) => !isAnonymousPersonLabel(label)) ?? [];
   $: knownPersonGroups = visiblePersonLabels
     .map((label) => ({
@@ -174,7 +185,10 @@
       count: discoveryState?.people.labelCounts?.[label] ?? personReferenceSamples(label, personSamples).length,
       references: personReferenceSamples(label, personSamples)
     }))
-    .sort((left, right) => right.count - left.count || left.displayLabel.localeCompare(right.displayLabel));
+    .sort((left, right) => left.displayLabel.localeCompare(right.displayLabel) || left.label.localeCompare(right.label));
+  $: processingPersonItems = Object.values(personProcessingQueue).sort(
+    (left, right) => left.queuedAtMs - right.queuedAtMs || left.sample.id.localeCompare(right.sample.id)
+  );
 
   onMount(() => {
     hydrated = true;
@@ -295,7 +309,8 @@
       if (response.ok && cameraSnapshot) {
         const streamedEvent = await response.json();
         if (isStreamedPatrolEvent(streamedEvent)) {
-          setCameraSnapshot(reduceCameraStateSnapshotEvent(cameraSnapshot, streamedEvent));
+          applyStreamedEventLocally(streamedEvent);
+          handlePersonRecognitionProgress(streamedEvent.event);
         }
       }
     } catch {
@@ -336,8 +351,9 @@
         const liveEvent = summarizeLiveEvent(event.data);
         liveEvents = [liveEvent, ...liveEvents].slice(0, 30);
         const streamedEvent = parseStreamedEvent(event.data);
-        if (streamedEvent && cameraSnapshot) {
-          setCameraSnapshot(reduceCameraStateSnapshotEvent(cameraSnapshot, streamedEvent));
+        if (streamedEvent) {
+          applyStreamedEventLocally(streamedEvent);
+          handlePersonRecognitionProgress(streamedEvent.event);
         }
       });
 
@@ -438,6 +454,35 @@
     );
   }
 
+  function patrolEventsFromPayload(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !('events' in value)) {
+      return [];
+    }
+
+    const events = (value as { events?: unknown }).events;
+    return Array.isArray(events) ? events.filter(isPatrolEvent) : [];
+  }
+
+  function personActionSampleId(event: PatrolEvent) {
+    const payload = event.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !('sampleId' in payload)) {
+      return null;
+    }
+
+    const sampleId = (payload as { sampleId?: unknown }).sampleId;
+    return typeof sampleId === 'string' ? sampleId : null;
+  }
+
+  function personSuggestionUpdateSampleIds(event: PatrolEvent) {
+    const payload = event.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !('sampleIds' in payload)) {
+      return [];
+    }
+
+    const sampleIds = (payload as { sampleIds?: unknown }).sampleIds;
+    return Array.isArray(sampleIds) ? sampleIds.filter((sampleId): sampleId is string => typeof sampleId === 'string') : [];
+  }
+
   function setCameraSnapshotFromPayload(payload: unknown) {
     if (isCameraStateSnapshot(payload)) {
       setCameraSnapshot(payload);
@@ -449,6 +494,53 @@
       cursor: cameraSnapshot?.cursor ?? null,
       cachedAtMs: Date.now()
     });
+  }
+
+  function applyStreamedEventLocally(streamedEvent: StreamedPatrolEvent) {
+    if (!cameraSnapshot) {
+      return;
+    }
+
+    setCameraSnapshot(reduceCameraStateSnapshotEvent(cameraSnapshot, streamedEvent));
+  }
+
+  function applyCameraEventsLocally(events: PatrolEvent[]) {
+    for (const event of events) {
+      applyStreamedEventLocally({ stream: 'cameras', event });
+      handlePersonRecognitionProgress(event);
+    }
+  }
+
+  function handlePersonRecognitionProgress(event: PatrolEvent) {
+    if (event.type === 'person.recognition.suggestions.updated') {
+      const sampleIds = personSuggestionUpdateSampleIds(event);
+      if (sampleIds.length === 0) {
+        return;
+      }
+
+      const nextQueue = { ...personProcessingQueue };
+      for (const sampleId of sampleIds) {
+        delete nextQueue[sampleId];
+      }
+      personProcessingQueue = nextQueue;
+      return;
+    }
+
+    if (event.type === 'person.recognition.sample.labeled' || event.type === 'person.recognition.sample.dismissed') {
+      const sampleId = personActionSampleId(event);
+      if (!sampleId || !personProcessingQueue[sampleId]) {
+        return;
+      }
+
+      personProcessingQueue = {
+        ...personProcessingQueue,
+        [sampleId]: {
+          ...personProcessingQueue[sampleId],
+          status: 'queued',
+          message: 'Waiting for recognizer to refresh suggestions...'
+        }
+      };
+    }
   }
 
   function setCameraSnapshot(snapshot: CameraStateSnapshot) {
@@ -1049,9 +1141,26 @@
       return;
     }
 
+    const queuedAtMs = Date.now();
     personLabelStatus = {
       ...personLabelStatus,
       ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saving' as const, message: 'Saving label...' }]))
+    };
+    personProcessingQueue = {
+      ...personProcessingQueue,
+      ...Object.fromEntries(
+        samples.map((sample, index) => [
+          sample.id,
+          {
+            sample,
+            action: 'label' as const,
+            label: normalizedLabel,
+            status: 'sending' as const,
+            message: 'Saving label...',
+            queuedAtMs: queuedAtMs + index
+          }
+        ])
+      )
     };
 
     try {
@@ -1067,7 +1176,11 @@
       if (!response.ok) {
         throw new Error(`Label save failed with HTTP ${response.status}`);
       }
-      setCameraSnapshotFromPayload(await response.json());
+      const events = patrolEventsFromPayload(await response.json());
+      if (events.length === 0) {
+        throw new Error('Label save did not return event facts.');
+      }
+      applyCameraEventsLocally(events);
       personLabelStatus = {
         ...personLabelStatus,
         ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'saved' as const, message: `Labeled ${normalizedLabel}.` }]))
@@ -1078,6 +1191,24 @@
         ...personLabelStatus,
         ...Object.fromEntries(sampleIds.map((sampleId) => [sampleId, { state: 'error' as const, message }]))
       };
+      personProcessingQueue = {
+        ...personProcessingQueue,
+        ...Object.fromEntries(
+          samples.map((sample) => [
+            sample.id,
+            {
+              ...(personProcessingQueue[sample.id] ?? {
+                sample,
+                action: 'label' as const,
+                label: normalizedLabel,
+                queuedAtMs: Date.now()
+              }),
+              status: 'error' as const,
+              message
+            }
+          ])
+        )
+      };
     }
   }
 
@@ -1085,6 +1216,17 @@
     personLabelStatus = {
       ...personLabelStatus,
       [sample.id]: { state: 'saving', message: 'Dismissing...' }
+    };
+    personProcessingQueue = {
+      ...personProcessingQueue,
+      [sample.id]: {
+        sample,
+        action: 'dismiss',
+        label: null,
+        status: 'sending',
+        message: 'Assigning anonymous identity...',
+        queuedAtMs: Date.now()
+      }
     };
 
     try {
@@ -1097,17 +1239,35 @@
       if (!response.ok) {
         throw new Error(`Dismiss failed with HTTP ${response.status}`);
       }
-      setCameraSnapshotFromPayload(await response.json());
+      const events = patrolEventsFromPayload(await response.json());
+      if (events.length === 0) {
+        throw new Error('Dismiss did not return event facts.');
+      }
+      applyCameraEventsLocally(events);
       personLabelStatus = {
         ...personLabelStatus,
         [sample.id]: { state: 'saved', message: 'Assigned anonymous identity.' }
       };
     } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
       personLabelStatus = {
         ...personLabelStatus,
         [sample.id]: {
           state: 'error',
-          message: caught instanceof Error ? caught.message : String(caught)
+          message
+        }
+      };
+      personProcessingQueue = {
+        ...personProcessingQueue,
+        [sample.id]: {
+          ...(personProcessingQueue[sample.id] ?? {
+            sample,
+            action: 'dismiss',
+            label: null,
+            queuedAtMs: Date.now()
+          }),
+          status: 'error',
+          message
         }
       };
     }
@@ -1127,12 +1287,24 @@
         key: label,
         label,
         displayLabel: personLabelDisplay(label),
-        samples: groupedSamples.sort(
-          (left, right) => (right.suggestedScore ?? 0) - (left.suggestedScore ?? 0) || right.occurredAtMs - left.occurredAtMs
-        ),
+        samples: groupedSamples.sort(comparePersonSamplesStable),
         references: personReferenceSamples(label, allSamples)
       }))
-      .sort((left, right) => right.samples.length - left.samples.length || left.label.localeCompare(right.label));
+      .sort(comparePersonGroupsStable);
+  }
+
+  function comparePersonGroupsStable(left: PersonTriageGroup, right: PersonTriageGroup) {
+    const leftAnonymous = isAnonymousPersonLabel(left.label);
+    const rightAnonymous = isAnonymousPersonLabel(right.label);
+    if (leftAnonymous !== rightAnonymous) {
+      return leftAnonymous ? 1 : -1;
+    }
+
+    return left.displayLabel.localeCompare(right.displayLabel) || left.label.localeCompare(right.label);
+  }
+
+  function comparePersonSamplesStable(left: PersonRecognitionSample, right: PersonRecognitionSample) {
+    return right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id);
   }
 
   function personReferenceSamples(label: string, allSamples: PersonRecognitionSample[]) {
@@ -1412,8 +1584,36 @@
           </section>
         {/if}
 
-        {#if reviewablePersonSamples.length > 0}
+        {#if reviewablePersonSamples.length > 0 || processingPersonItems.length > 0}
           <div class="person-triage" aria-label="Person recognition triage">
+            {#if processingPersonItems.length > 0}
+              <section class="person-group processing-person-group" aria-label="Processing person labels">
+                <div class="person-group-header">
+                  <div>
+                    <h3>Processing</h3>
+                    <p>{processingPersonItems.length} queued action{processingPersonItems.length === 1 ? '' : 's'} waiting for the recognizer.</p>
+                  </div>
+                </div>
+                <ol class="person-grid" aria-label="Processing person label actions">
+                  {#each processingPersonItems as item}
+                    <li class:error={item.status === 'error'} class="person-card processing-person-card" data-testid="person-processing-card">
+                      <img src={item.sample.cropUrl} alt={`Queued person sample from ${formatDateTime(item.sample.occurredAtMs)}`} />
+                      <div class="person-card-body">
+                        <div>
+                          <h4>{item.action === 'label' ? `Labeling ${item.label}` : 'Assigning anonymous identity'}</h4>
+                          <p>
+                            {cameraById(item.sample.cameraId)?.name ?? cameraById(item.sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
+                            · {formatDateTime(item.sample.occurredAtMs)}
+                          </p>
+                          <p class="suggestion">{item.message}</p>
+                        </div>
+                      </div>
+                    </li>
+                  {/each}
+                </ol>
+              </section>
+            {/if}
+
             {#each highConfidencePersonGroups as group}
               <section class="person-group" aria-label={`High confidence ${group.displayLabel} samples`}>
                 <div class="person-group-header">
@@ -2544,6 +2744,11 @@
     padding: 14px;
   }
 
+  .processing-person-group {
+    border-color: #b6c6d6;
+    background: #f7fafc;
+  }
+
   .person-group-header {
     display: flex;
     align-items: flex-start;
@@ -2595,6 +2800,15 @@
     border-radius: 8px;
     background: #f9fafb;
     padding: 10px;
+  }
+
+  .processing-person-card {
+    border-color: #c8d4df;
+  }
+
+  .processing-person-card.error {
+    border-color: #c94f4f;
+    background: #fff7f7;
   }
 
   .person-card > img {

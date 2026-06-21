@@ -67,6 +67,7 @@ async function scanOnceIfIdle() {
 
 async function scanOnce() {
   const events = await readJsonlDir(eventsDir, 'cameras-');
+  await acknowledgePersonLabelActions(events);
   const processedSourceEventIds = new Set(
     events
       .filter(
@@ -93,6 +94,36 @@ async function scanOnce() {
 
     await analyzePersonAlert(event, segments, mainStreamNames);
   }
+}
+
+async function acknowledgePersonLabelActions(events) {
+  const processedActionEventIds = new Set(
+    events
+      .filter((event) => event.type === 'person.recognition.suggestions.updated')
+      .flatMap((event) => Array.isArray(event.payload?.processedEventIds) ? event.payload.processedEventIds : [])
+  );
+  const pendingActions = events
+    .filter(
+      (event) =>
+        event.type === 'person.recognition.sample.labeled' ||
+        event.type === 'person.recognition.sample.dismissed'
+    )
+    .filter((event) => !processedActionEventIds.has(event.id))
+    .sort((left, right) => left.ts_ms - right.ts_ms || left.id.localeCompare(right.id));
+
+  if (pendingActions.length === 0) {
+    return;
+  }
+
+  await appendCameraEvent({
+    type: 'person.recognition.suggestions.updated',
+    source: 'patrol-person-recognizer',
+    payload: {
+      processedEventIds: pendingActions.map((event) => event.id),
+      sampleIds: Array.from(new Set(pendingActions.map((event) => event.payload.sampleId).filter(Boolean))).sort(),
+      updatedAtMs: Date.now()
+    }
+  });
 }
 
 async function analyzePersonAlert(event, segments, mainStreamNames) {
