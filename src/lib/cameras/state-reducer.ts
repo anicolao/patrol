@@ -1454,21 +1454,30 @@ function recordingStateFromReviewedEvents(
 }
 
 function refreshReviewEventsForSegment(events: ReviewableSecurityEvent[], segment: RecordingSegment) {
-  return events.map((event) => {
+  let updatedEvents: ReviewableSecurityEvent[] | null = null;
+
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (event.occurredAtMs < segment.startMs) {
+      break;
+    }
+
     if (
       event.cameraId !== segment.cameraId ||
-      event.occurredAtMs < segment.startMs ||
       event.occurredAtMs > segment.endMs ||
       !segmentPreferredForEvent(event, segment)
     ) {
-      return event;
+      continue;
     }
 
-    return {
+    updatedEvents ??= [...events];
+    updatedEvents[index] = {
       ...event,
       preferredSegment: segment
     };
-  });
+  }
+
+  return updatedEvents ?? events;
 }
 
 function segmentPreferredForEvent(event: ReviewableSecurityEvent, segment: RecordingSegment) {
