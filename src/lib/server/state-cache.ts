@@ -24,11 +24,13 @@ interface ServerCameraStateSnapshot extends CameraStateSnapshot {
   };
 }
 
-export async function currentCameraStateSnapshot(options: { forceRefresh?: boolean } = {}): Promise<CameraStateSnapshot> {
+export async function currentCameraStateSnapshot(
+  options: { forceRefresh?: boolean; compactForClient?: boolean } = {}
+): Promise<CameraStateSnapshot> {
   if (!options.forceRefresh) {
     const cached = await readCachedCameraStateSnapshot({ maxAgeMs: SERVER_STATE_CACHE_MAX_AGE_MS });
     if (cached) {
-      return responseSnapshot(cached);
+      return responseSnapshot(cached, options);
     }
   }
 
@@ -52,7 +54,7 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
     if (shouldRewriteCheckpoint(baseSnapshot, streamedEvents.length)) {
       await writeStateSnapshot(response);
     }
-    return responseSnapshot(response);
+    return responseSnapshot(response, options);
   }
 
   const {
@@ -71,7 +73,7 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
     }
   };
   await writeStateSnapshot(snapshot);
-  return responseSnapshot(snapshot);
+  return responseSnapshot(snapshot, options);
 }
 
 export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<ServerCameraStateSnapshot | null> {
@@ -129,9 +131,12 @@ async function readStreamedEventsAfterPositions(streamPositions: Record<string, 
   };
 }
 
-function responseSnapshot(snapshot: ServerCameraStateSnapshot): CameraStateSnapshot {
+function responseSnapshot(
+  snapshot: ServerCameraStateSnapshot,
+  options: { compactForClient?: boolean } = {}
+): CameraStateSnapshot {
   const { serverCache: _serverCache, ...clientSnapshot } = snapshot;
-  return compactCameraStateSnapshot(clientSnapshot);
+  return options.compactForClient === false ? clientSnapshot : compactCameraStateSnapshot(clientSnapshot);
 }
 
 function shouldRewriteCheckpoint(snapshot: ServerCameraStateSnapshot, tailEventCount: number) {

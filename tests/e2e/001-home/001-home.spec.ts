@@ -243,6 +243,22 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: recordingThumbnailSvg()
     });
   });
+  await page.route('**/api/recordings/history**', async (route) => {
+    const recordings = recordingState(fixedNowMs - 4000);
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        startMs: fixedNowMs - 6 * 60 * 60 * 1000,
+        endMs: fixedNowMs,
+        availableStartMs: recordings.segments[0].startMs,
+        availableEndMs: recordings.segments[0].endMs,
+        hasOlder: false,
+        hasNewer: false,
+        segments: recordings.segments,
+        events: recordings.events
+      })
+    });
+  });
 
   await page.goto('/');
 

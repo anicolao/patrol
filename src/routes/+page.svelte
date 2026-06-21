@@ -64,6 +64,16 @@
     previewQuality: string;
     playbackQuality: string;
   };
+  type HistoryRecordingWindow = {
+    startMs: number;
+    endMs: number;
+    availableStartMs: number | null;
+    availableEndMs: number | null;
+    hasOlder: boolean;
+    hasNewer: boolean;
+    segments: RecordingSegment[];
+    events: ReviewableSecurityEvent[];
+  };
   type PersonTriageGroup = {
     key: string;
     label: string;
@@ -92,6 +102,7 @@
   const historyTimelineBucketMs = 2 * 60 * 1000;
   const historyTimelinePaddingPx = 168;
   const historyTimelineMinimumDurationMs = 60 * 60 * 1000;
+  const historyRecordingWindowMs = 6 * 60 * 60 * 1000;
   const reviewablePersonCropVersion = 'motion-diff-v3';
   const highConfidencePersonScore = 0.8;
   const suggestedPersonScore = 0.3;
@@ -121,7 +132,11 @@
   let selectedReviewEvent: ReviewableSecurityEvent | null = null;
   let selectedHistoryTimeMs: number | null = null;
   let playbackHistoryTimeMs: number | null = null;
+  let historyRecordingWindow: HistoryRecordingWindow | null = null;
+  let historyWindowLoading = false;
+  let historyWindowError: string | null = null;
   let historyEvents: ReviewableSecurityEvent[] = [];
+  let historySegments: RecordingSegment[] = [];
   let historyCameraPlaybacks: HistoryCameraPlayback[] = [];
   let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
   let historyTimelineElement: HTMLElement | null = null;
@@ -141,7 +156,11 @@
   $: allProcessesGreen =
     (discoveryState?.processes.length ?? 0) > 0 &&
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
-  $: historyEvents = discoveryState?.recordings.events ?? [];
+  $: historyEvents = historyRecordingWindow?.events ?? discoveryState?.recordings.events ?? [];
+  $: historySegments = historyRecordingWindow?.segments ?? discoveryState?.recordings.segments ?? [];
+  $: if (browser && activeTab === 'history' && discoveryState && !historyRecordingWindow && !historyWindowLoading) {
+    void loadHistoryRecordingWindow(selectedHistoryTimeMs);
+  }
   $: if (selectedHistoryTimeMs === null) {
     const defaultReviewEvent = historyEvents.find((event) => event.preferredSegment);
     if (defaultReviewEvent) {
@@ -153,10 +172,10 @@
   $: selectedReviewEvent = selectedReviewEventId
     ? (historyEvents.find((event) => event.id === selectedReviewEventId) ?? null)
     : null;
-  $: historyTimeline = buildHistoryTimeline(historyEvents, discoveryState?.recordings.segments ?? []);
+  $: historyTimeline = buildHistoryTimeline(historyEvents, historySegments);
   $: historyCameraPlaybacks = buildHistoryCameraPlaybacks(
     configuredCameras,
-    discoveryState?.recordings.segments ?? [],
+    historySegments,
     selectedHistoryTimeMs,
     playbackHistoryTimeMs
   );
@@ -259,6 +278,52 @@
         void loadDiscoveryState(true);
       }
     }
+  }
+
+  async function loadHistoryRecordingWindow(centerMs: number | null = null) {
+    if (historyWindowLoading) {
+      return;
+    }
+
+    historyWindowLoading = true;
+    historyWindowError = null;
+    try {
+      const params = new URLSearchParams();
+      if (centerMs !== null) {
+        params.set('centerMs', String(centerMs));
+      }
+      const response = await fetch(`/api/recordings/history${params.size ? `?${params.toString()}` : ''}`);
+      if (!response.ok) {
+        throw new Error(`Recording history failed with HTTP ${response.status}`);
+      }
+      const window = (await response.json()) as HistoryRecordingWindow;
+      historyRecordingWindow = window;
+      if (discoveryState) {
+        ensureHistorySelection({
+          ...discoveryState,
+          recordings: {
+            ...discoveryState.recordings,
+            events: window.events,
+            segments: window.segments
+          }
+        });
+      }
+    } catch (caught) {
+      historyWindowError = caught instanceof Error ? caught.message : String(caught);
+    } finally {
+      historyWindowLoading = false;
+    }
+  }
+
+  async function shiftHistoryRecordingWindow(direction: -1 | 1) {
+    const current = historyRecordingWindow;
+    const centerMs =
+      current === null
+        ? selectedHistoryTimeMs
+        : direction < 0
+          ? current.startMs - historyRecordingWindowMs / 2
+          : current.endMs + historyRecordingWindowMs / 2;
+    await loadHistoryRecordingWindow(centerMs);
   }
 
   async function discoverCameras() {
@@ -1919,7 +1984,7 @@
           </div>
         </div>
 
-        {#if discoveryState.recordings.events.length > 0 || discoveryState.recordings.segments.length > 0}
+        {#if historyEvents.length > 0 || historySegments.length > 0 || historyWindowLoading}
           <div class="history-workspace">
             <section class="recording-player" aria-label="Synchronized camera recordings" data-testid="recording-player">
               <div class="recording-player-header">
@@ -1985,12 +2050,41 @@
               <div class="history-timeline-header">
                 <div>
                   <h3>Timeline</h3>
-                  <p>Scroll the timeline under the fixed playhead to scrub video.</p>
+                  <p>
+                    Scroll the timeline under the fixed playhead to scrub video.
+                    {#if historyRecordingWindow}
+                      Loaded {formatTimelineRange(historyRecordingWindow.startMs, historyRecordingWindow.endMs)}.
+                    {/if}
+                  </p>
                 </div>
-                {#if selectedHistoryTimeMs !== null}
-                  <strong>{formatDateTime(selectedHistoryTimeMs)}</strong>
-                {/if}
+                <div class="history-window-controls">
+                  <button
+                    type="button"
+                    class="secondary"
+                    disabled={historyWindowLoading || !historyRecordingWindow?.hasOlder}
+                    onclick={() => shiftHistoryRecordingWindow(-1)}
+                  >
+                    Earlier
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary"
+                    disabled={historyWindowLoading || !historyRecordingWindow?.hasNewer}
+                    onclick={() => shiftHistoryRecordingWindow(1)}
+                  >
+                    Later
+                  </button>
+                  {#if selectedHistoryTimeMs !== null}
+                    <strong>{formatDateTime(selectedHistoryTimeMs)}</strong>
+                  {/if}
+                </div>
               </div>
+
+              {#if historyWindowError}
+                <p class="notice error compact">{historyWindowError}</p>
+              {:else if historyWindowLoading}
+                <p class="notice compact">Loading recording timeline...</p>
+              {/if}
 
               <div
                 class="history-timeline"
@@ -3170,6 +3264,18 @@
     color: #1f4f82;
     font-size: 0.86rem;
     white-space: nowrap;
+  }
+
+  .history-window-controls {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .history-window-controls .secondary {
+    min-width: 84px;
+    padding: 8px 10px;
   }
 
   .history-timeline {
