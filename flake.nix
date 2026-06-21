@@ -105,6 +105,13 @@
               node scripts/install-watchdog-cron.mjs
             '';
           };
+          patrol-branch-audit = pkgs.writeShellApplication {
+            name = "patrol-branch-audit";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              node scripts/audit-branches.mjs "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -119,6 +126,7 @@
               patrol-go2rtc-config
               patrol-go2rtc-observe
               patrol-go2rtc-start
+              patrol-branch-audit
               patrol-person-recognizer
               patrol-recorder
               patrol-watchdog

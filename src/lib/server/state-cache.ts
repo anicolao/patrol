@@ -1,45 +1,60 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CameraStateSnapshot, PatrolEvent } from '$lib/events';
-import { reduceCameraDiscoveryEvents } from '$lib/cameras/state-reducer';
+import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
 import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
-import { latestCursorForEvents, readEvents } from '$lib/server/event-store';
+import { latestCursorForEvents, readEvents, readStreamedEventsAfter } from '$lib/server/event-store';
 import { readSystemEvents } from '$lib/server/system-events';
 
 const CAMERA_STREAM = 'cameras';
+const SYSTEM_STREAM = 'system';
+const SNAPSHOT_STREAMS = [CAMERA_STREAM, SYSTEM_STREAM];
 const SERVER_STATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
 export async function currentCameraStateSnapshot(options: { forceRefresh?: boolean } = {}): Promise<CameraStateSnapshot> {
   if (!options.forceRefresh) {
-    const cached = await readCachedCameraStateSnapshot();
+    const cached = await readCachedCameraStateSnapshot({ maxAgeMs: SERVER_STATE_CACHE_MAX_AGE_MS });
     if (cached) {
-      const compacted = compactCameraStateSnapshot(cached);
-      if (compacted.state.recordings.events.length !== cached.state.recordings.events.length ||
-        compacted.state.recordings.segments.length !== cached.state.recordings.segments.length) {
-        await writeStateSnapshot(compacted);
-      }
-      return compacted;
+      return compactCameraStateSnapshot(cached);
     }
+  }
+
+  const baseSnapshot = await readCachedCameraStateSnapshot();
+  if (baseSnapshot) {
+    let snapshot: CameraStateSnapshot = {
+      ...baseSnapshot,
+      cachedAtMs: Date.now()
+    };
+    const streamedEvents = await readStreamedEventsAfter(SNAPSHOT_STREAMS, baseSnapshot.cursor);
+    for (const streamedEvent of streamedEvents) {
+      snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
+    }
+    snapshot = {
+      ...snapshot,
+      cachedAtMs: Date.now()
+    };
+    await writeStateSnapshot(snapshot);
+    return compactCameraStateSnapshot(snapshot);
   }
 
   const [cameraEvents, systemEvents] = await Promise.all([readEvents(CAMERA_STREAM), readSystemEvents()]);
   const events = [...cameraEvents, ...systemEvents];
-  const snapshot = compactCameraStateSnapshot({
+  const snapshot = {
     state: reduceCameraDiscoveryEvents(cameraEvents, systemEvents),
     cursor: latestCursorForEvents(events),
     cachedAtMs: Date.now()
-  });
+  };
   await writeStateSnapshot(snapshot);
-  return snapshot;
+  return compactCameraStateSnapshot(snapshot);
 }
 
-export async function readCachedCameraStateSnapshot(): Promise<CameraStateSnapshot | null> {
+export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<CameraStateSnapshot | null> {
   try {
     const snapshot = JSON.parse(await readFile(await stateSnapshotPath(), 'utf8')) as CameraStateSnapshot;
     if (!isCameraStateSnapshot(snapshot)) {
       return null;
     }
-    if (Date.now() - snapshot.cachedAtMs > SERVER_STATE_CACHE_MAX_AGE_MS) {
+    if (options.maxAgeMs !== undefined && Date.now() - snapshot.cachedAtMs > options.maxAgeMs) {
       return null;
     }
     return snapshot;
@@ -56,7 +71,7 @@ async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
 
 async function stateSnapshotPath() {
   const root = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
-  return path.join(root, 'cache', 'camera-state.json');
+  return path.join(root, 'cache', 'server-camera-state.json');
 }
 
 function isCameraStateSnapshot(value: unknown): value is CameraStateSnapshot {

@@ -34,6 +34,22 @@ export async function appendEvent<TPayload>(
 }
 
 export async function readEvents(stream: string): Promise<PatrolEvent[]> {
+  return await readEventsMatching(stream, () => true);
+}
+
+export async function readEventsAfter(stream: string, cursor: EventCursor | null): Promise<PatrolEvent[]> {
+  if (!cursor) {
+    return await readEvents(stream);
+  }
+
+  const cursorDay = new Date(cursor.ts_ms).toISOString().slice(0, 10);
+  return await readEventsMatching(stream, (eventFile) => eventFile.slice(stream.length + 1, stream.length + 11) >= cursorDay)
+    .then((events) =>
+      events.filter((event) => event.ts_ms > cursor.ts_ms || (event.ts_ms === cursor.ts_ms && event.id > cursor.id))
+    );
+}
+
+async function readEventsMatching(stream: string, includeFile: (eventFile: string) => boolean): Promise<PatrolEvent[]> {
   const eventsDir = await eventDir();
   let entries: string[];
   try {
@@ -44,6 +60,7 @@ export async function readEvents(stream: string): Promise<PatrolEvent[]> {
 
   const eventFiles = entries
     .filter((entry) => entry.startsWith(`${stream}-`) && entry.endsWith('.jsonl'))
+    .filter(includeFile)
     .sort();
   const events: PatrolEvent[] = [];
 
@@ -71,12 +88,10 @@ export async function readStreamedEventsAfter(
   streams: string[],
   cursor: EventCursor | null
 ): Promise<Array<{ stream: string; event: PatrolEvent }>> {
-  const events = await readAllStreamedEvents(streams);
-  if (!cursor) {
-    return events;
-  }
-
-  return events.filter(({ event }) => event.ts_ms > cursor.ts_ms || (event.ts_ms === cursor.ts_ms && event.id > cursor.id));
+  const grouped = await Promise.all(
+    streams.map(async (stream) => (await readEventsAfter(stream, cursor)).map((event) => ({ stream, event })))
+  );
+  return grouped.flat().sort(compareStreamedEvents);
 }
 
 export function latestCursorForEvents(events: PatrolEvent[]): EventCursor | null {
