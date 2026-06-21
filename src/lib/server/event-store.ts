@@ -3,6 +3,11 @@ import { mkdir, open, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { EventCursor, PatrolEvent } from '$lib/events';
 
+export interface EventFilePosition {
+  file: string;
+  offset: number;
+}
+
 interface NewPatrolEvent<TPayload> {
   type: string;
   source: string;
@@ -34,6 +39,12 @@ export async function appendEvent<TPayload>(
 }
 
 export async function readEvents(stream: string): Promise<PatrolEvent[]> {
+  return (await readEventsWithPosition(stream)).events;
+}
+
+export async function readEventsWithPosition(
+  stream: string
+): Promise<{ events: PatrolEvent[]; position: EventFilePosition | null }> {
   return await readEventsMatching(stream, () => true);
 }
 
@@ -45,36 +56,75 @@ export async function readEventsAfter(stream: string, cursor: EventCursor | null
   const cursorDay = new Date(cursor.ts_ms).toISOString().slice(0, 10);
   return await readEventsMatching(stream, (eventFile) => eventFile.slice(stream.length + 1, stream.length + 11) >= cursorDay)
     .then((events) =>
-      events.filter((event) => event.ts_ms > cursor.ts_ms || (event.ts_ms === cursor.ts_ms && event.id > cursor.id))
+      events.events.filter((event) => event.ts_ms > cursor.ts_ms || (event.ts_ms === cursor.ts_ms && event.id > cursor.id))
     );
 }
 
-async function readEventsMatching(stream: string, includeFile: (eventFile: string) => boolean): Promise<PatrolEvent[]> {
+export async function readEventsAfterPosition(
+  stream: string,
+  position: EventFilePosition | null
+): Promise<{ events: PatrolEvent[]; position: EventFilePosition | null }> {
+  if (!position) {
+    return await readEventsWithPosition(stream);
+  }
+
+  return await readEventsMatching(
+    stream,
+    (eventFile) => eventFile >= position.file,
+    (eventFile) => (eventFile === position.file ? position.offset : 0)
+  );
+}
+
+async function readEventsMatching(
+  stream: string,
+  includeFile: (eventFile: string) => boolean,
+  startOffsetForFile: (eventFile: string) => number = () => 0
+): Promise<{ events: PatrolEvent[]; position: EventFilePosition | null }> {
   const eventsDir = await eventDir();
   let entries: string[];
   try {
     entries = await readdir(eventsDir);
   } catch {
-    return [];
+    return { events: [], position: null };
   }
 
   const eventFiles = entries
     .filter((entry) => entry.startsWith(`${stream}-`) && entry.endsWith('.jsonl'))
-    .filter(includeFile)
     .sort();
   const events: PatrolEvent[] = [];
+  let position: EventFilePosition | null = null;
 
-  for (const eventFile of eventFiles) {
-    const content = await readFile(path.join(eventsDir, eventFile), 'utf8');
-    for (const line of content.split('\n')) {
+  for (const eventFile of eventFiles.filter(includeFile)) {
+    const content = await readFile(path.join(eventsDir, eventFile));
+    const startOffset = Math.min(Math.max(0, startOffsetForFile(eventFile)), content.length);
+    const readableContent = content.subarray(startOffset).toString('utf8');
+    for (const line of readableContent.split('\n')) {
       if (!line.trim()) {
         continue;
       }
       events.push(JSON.parse(line) as PatrolEvent);
     }
+    position = {
+      file: eventFile,
+      offset: content.length
+    };
   }
 
-  return events.sort((a, b) => a.ts_ms - b.ts_ms || a.id.localeCompare(b.id));
+  if (!position) {
+    const latestFile = eventFiles.at(-1);
+    if (latestFile) {
+      const content = await readFile(path.join(eventsDir, latestFile));
+      position = {
+        file: latestFile,
+        offset: content.length
+      };
+    }
+  }
+
+  return {
+    events: events.sort((a, b) => a.ts_ms - b.ts_ms || a.id.localeCompare(b.id)),
+    position
+  };
 }
 
 export async function readAllStreamedEvents(streams: string[]): Promise<Array<{ stream: string; event: PatrolEvent }>> {

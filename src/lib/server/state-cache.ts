@@ -3,54 +3,79 @@ import path from 'node:path';
 import type { CameraStateSnapshot, PatrolEvent } from '$lib/events';
 import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
 import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
-import { latestCursorForEvents, readEvents, readStreamedEventsAfter } from '$lib/server/event-store';
-import { readSystemEvents } from '$lib/server/system-events';
+import {
+  latestCursorForEvents,
+  readEventsAfterPosition,
+  readEventsWithPosition,
+  type EventFilePosition
+} from '$lib/server/event-store';
 
 const CAMERA_STREAM = 'cameras';
 const SYSTEM_STREAM = 'system';
 const SNAPSHOT_STREAMS = [CAMERA_STREAM, SYSTEM_STREAM];
 const SERVER_STATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
+interface ServerCameraStateSnapshot extends CameraStateSnapshot {
+  serverCache?: {
+    version: 1;
+    streamPositions: Record<string, EventFilePosition | null>;
+  };
+}
+
 export async function currentCameraStateSnapshot(options: { forceRefresh?: boolean } = {}): Promise<CameraStateSnapshot> {
   if (!options.forceRefresh) {
     const cached = await readCachedCameraStateSnapshot({ maxAgeMs: SERVER_STATE_CACHE_MAX_AGE_MS });
     if (cached) {
-      return compactCameraStateSnapshot(cached);
+      return responseSnapshot(cached);
     }
   }
 
   const baseSnapshot = await readCachedCameraStateSnapshot();
-  if (baseSnapshot) {
-    let snapshot: CameraStateSnapshot = {
+  if (baseSnapshot?.serverCache?.version === 1) {
+    let snapshot: ServerCameraStateSnapshot = {
       ...baseSnapshot,
       cachedAtMs: Date.now()
     };
-    const streamedEvents = await readStreamedEventsAfter(SNAPSHOT_STREAMS, baseSnapshot.cursor);
+    const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
     for (const streamedEvent of streamedEvents) {
       snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
     }
     snapshot = {
       ...snapshot,
-      cachedAtMs: Date.now()
+      cachedAtMs: Date.now(),
+      serverCache: {
+        version: 1,
+        streamPositions
+      }
     };
-    await writeStateSnapshot(snapshot);
-    return compactCameraStateSnapshot(snapshot);
+    if (streamedEvents.length > 0 || snapshot.cursor?.id !== baseSnapshot.cursor?.id) {
+      await writeStateSnapshot(snapshot);
+    }
+    return responseSnapshot(snapshot);
   }
 
-  const [cameraEvents, systemEvents] = await Promise.all([readEvents(CAMERA_STREAM), readSystemEvents()]);
+  const {
+    cameraEvents,
+    systemEvents,
+    streamPositions
+  } = await readFullSnapshotInputs();
   const events = [...cameraEvents, ...systemEvents];
-  const snapshot = {
+  const snapshot: ServerCameraStateSnapshot = {
     state: reduceCameraDiscoveryEvents(cameraEvents, systemEvents),
     cursor: latestCursorForEvents(events),
-    cachedAtMs: Date.now()
+    cachedAtMs: Date.now(),
+    serverCache: {
+      version: 1,
+      streamPositions
+    }
   };
   await writeStateSnapshot(snapshot);
-  return compactCameraStateSnapshot(snapshot);
+  return responseSnapshot(snapshot);
 }
 
-export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<CameraStateSnapshot | null> {
+export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<ServerCameraStateSnapshot | null> {
   try {
-    const snapshot = JSON.parse(await readFile(await stateSnapshotPath(), 'utf8')) as CameraStateSnapshot;
+    const snapshot = JSON.parse(await readFile(await stateSnapshotPath(), 'utf8')) as ServerCameraStateSnapshot;
     if (!isCameraStateSnapshot(snapshot)) {
       return null;
     }
@@ -67,6 +92,45 @@ async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
   const snapshotPath = await stateSnapshotPath();
   await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
   await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function readFullSnapshotInputs() {
+  const [cameraRead, systemRead] = await Promise.all(
+    SNAPSHOT_STREAMS.map(async (stream) => ({
+      stream,
+      ...(await readEventsWithPosition(stream))
+    }))
+  );
+
+  return {
+    cameraEvents: cameraRead.events,
+    systemEvents: systemRead.events,
+    streamPositions: {
+      [cameraRead.stream]: cameraRead.position,
+      [systemRead.stream]: systemRead.position
+    }
+  };
+}
+
+async function readStreamedEventsAfterPositions(streamPositions: Record<string, EventFilePosition | null>) {
+  const reads = await Promise.all(
+    SNAPSHOT_STREAMS.map(async (stream) => ({
+      stream,
+      ...(await readEventsAfterPosition(stream, streamPositions[stream] ?? null))
+    }))
+  );
+
+  return {
+    streamedEvents: reads
+      .flatMap((read) => read.events.map((event) => ({ stream: read.stream, event })))
+      .sort((left, right) => left.event.ts_ms - right.event.ts_ms || left.event.id.localeCompare(right.event.id)),
+    streamPositions: Object.fromEntries(reads.map((read) => [read.stream, read.position]))
+  };
+}
+
+function responseSnapshot(snapshot: ServerCameraStateSnapshot): CameraStateSnapshot {
+  const { serverCache: _serverCache, ...clientSnapshot } = snapshot;
+  return compactCameraStateSnapshot(clientSnapshot);
 }
 
 async function stateSnapshotPath() {
