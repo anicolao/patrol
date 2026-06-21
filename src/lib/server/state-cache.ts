@@ -13,9 +13,9 @@ import {
 const CAMERA_STREAM = 'cameras';
 const SYSTEM_STREAM = 'system';
 const SNAPSHOT_STREAMS = [CAMERA_STREAM, SYSTEM_STREAM];
-const SERVER_STATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 const SERVER_STATE_CHECKPOINT_REWRITE_MS = 5 * 60 * 1000;
 const SERVER_STATE_CHECKPOINT_TAIL_EVENT_LIMIT = 1000;
+const SERVER_STATE_REQUEST_REPLAY_EVENT_LIMIT = 1000;
 
 interface ServerCameraStateSnapshot extends CameraStateSnapshot {
   serverCache?: {
@@ -28,7 +28,7 @@ export async function currentCameraStateSnapshot(
   options: { forceRefresh?: boolean; compactForClient?: boolean } = {}
 ): Promise<CameraStateSnapshot> {
   if (!options.forceRefresh) {
-    const cached = await readCachedCameraStateSnapshot({ maxAgeMs: SERVER_STATE_CACHE_MAX_AGE_MS });
+    const cached = await readCachedCameraStateSnapshot();
     if (cached) {
       return responseSnapshot(cached, options);
     }
@@ -40,6 +40,9 @@ export async function currentCameraStateSnapshot(
       ...baseSnapshot
     };
     const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
+    if (streamedEvents.length > SERVER_STATE_REQUEST_REPLAY_EVENT_LIMIT) {
+      return responseSnapshot(baseSnapshot, options);
+    }
     for (const streamedEvent of streamedEvents) {
       snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
     }
