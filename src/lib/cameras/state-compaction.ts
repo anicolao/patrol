@@ -2,7 +2,7 @@ import type { CameraDiscoveryState, RecordingSegment, ReviewableSecurityEvent } 
 import type { CameraStateSnapshot } from '$lib/events';
 
 export const UI_RECORDING_EVENT_LIMIT = 500;
-export const UI_RECORDING_SEGMENT_LIMIT = 2500;
+export const UI_RECORDING_SEGMENT_LIMIT = 300;
 export const UI_PERSON_SAMPLE_LIMIT = 300;
 export const UI_PERSON_REFERENCE_SAMPLE_LIMIT_PER_LABEL = 8;
 
