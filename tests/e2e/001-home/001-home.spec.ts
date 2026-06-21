@@ -143,7 +143,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     });
   }, fixedNowMs);
 
-  await page.route('**/api/state', async (route) => {
+  await page.route('**/api/state**', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify(discoveryState)

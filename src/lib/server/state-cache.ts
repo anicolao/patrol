@@ -14,6 +14,8 @@ const CAMERA_STREAM = 'cameras';
 const SYSTEM_STREAM = 'system';
 const SNAPSHOT_STREAMS = [CAMERA_STREAM, SYSTEM_STREAM];
 const SERVER_STATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
+const SERVER_STATE_CHECKPOINT_REWRITE_MS = 5 * 60 * 1000;
+const SERVER_STATE_CHECKPOINT_TAIL_EVENT_LIMIT = 1000;
 
 interface ServerCameraStateSnapshot extends CameraStateSnapshot {
   serverCache?: {
@@ -33,25 +35,24 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
   const baseSnapshot = await readCachedCameraStateSnapshot();
   if (baseSnapshot?.serverCache?.version === 1) {
     let snapshot: ServerCameraStateSnapshot = {
-      ...baseSnapshot,
-      cachedAtMs: Date.now()
+      ...baseSnapshot
     };
     const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
     for (const streamedEvent of streamedEvents) {
       snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
     }
-    snapshot = {
+    const response = {
       ...snapshot,
       cachedAtMs: Date.now(),
       serverCache: {
-        version: 1,
+        version: 1 as const,
         streamPositions
       }
     };
-    if (streamedEvents.length > 0 || snapshot.cursor?.id !== baseSnapshot.cursor?.id) {
-      await writeStateSnapshot(snapshot);
+    if (shouldRewriteCheckpoint(baseSnapshot, streamedEvents.length)) {
+      await writeStateSnapshot(response);
     }
-    return responseSnapshot(snapshot);
+    return responseSnapshot(response);
   }
 
   const {
@@ -131,6 +132,17 @@ async function readStreamedEventsAfterPositions(streamPositions: Record<string, 
 function responseSnapshot(snapshot: ServerCameraStateSnapshot): CameraStateSnapshot {
   const { serverCache: _serverCache, ...clientSnapshot } = snapshot;
   return compactCameraStateSnapshot(clientSnapshot);
+}
+
+function shouldRewriteCheckpoint(snapshot: ServerCameraStateSnapshot, tailEventCount: number) {
+  if (tailEventCount === 0) {
+    return false;
+  }
+
+  return (
+    Date.now() - snapshot.cachedAtMs >= SERVER_STATE_CHECKPOINT_REWRITE_MS ||
+    tailEventCount >= SERVER_STATE_CHECKPOINT_TAIL_EVENT_LIMIT
+  );
 }
 
 async function stateSnapshotPath() {
