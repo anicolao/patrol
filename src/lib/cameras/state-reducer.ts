@@ -802,7 +802,11 @@ function withRecordingSegmentObserved(
   return withProcessEvent(
     {
       ...state,
-      recordings: rebuildRecordingState(segments, state.recordings.events, state.devices.length)
+      recordings: recordingStateFromReviewedEvents(
+        segments,
+        refreshReviewEventsForSegment(state.recordings.events, segment),
+        state.devices.length
+      )
     },
     'patrol-recorder',
     {
@@ -1424,9 +1428,17 @@ function rebuildRecordingState(
     }))
     .sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id));
 
+  return recordingStateFromReviewedEvents(sortedSegments, refreshedEvents, cameraCount);
+}
+
+function recordingStateFromReviewedEvents(
+  segments: RecordingSegment[],
+  events: ReviewableSecurityEvent[],
+  cameraCount: number
+): RecordingState {
   return {
-    segments: sortedSegments,
-    events: refreshedEvents,
+    segments,
+    events,
     storage: {
       cameraCount,
       mainRetentionDays: MAIN_RECORDING_RETENTION_DAYS,
@@ -1436,9 +1448,38 @@ function rebuildRecordingState(
       totalEstimatedBytes:
         estimateBytes(cameraCount, MAIN_ESTIMATED_BITS_PER_SECOND, MAIN_RECORDING_RETENTION_DAYS) +
         estimateBytes(cameraCount, SUB_ESTIMATED_BITS_PER_SECOND, SUB_RECORDING_RETENTION_DAYS),
-      observedBytes: sortedSegments.reduce((total, segment) => total + segment.sizeBytes, 0)
+      observedBytes: segments.reduce((total, segment) => total + segment.sizeBytes, 0)
     }
   };
+}
+
+function refreshReviewEventsForSegment(events: ReviewableSecurityEvent[], segment: RecordingSegment) {
+  return events.map((event) => {
+    if (
+      event.cameraId !== segment.cameraId ||
+      event.occurredAtMs < segment.startMs ||
+      event.occurredAtMs > segment.endMs ||
+      !segmentPreferredForEvent(event, segment)
+    ) {
+      return event;
+    }
+
+    return {
+      ...event,
+      preferredSegment: segment
+    };
+  });
+}
+
+function segmentPreferredForEvent(event: ReviewableSecurityEvent, segment: RecordingSegment) {
+  const existing = event.preferredSegment;
+  if (!existing) {
+    return true;
+  }
+  if (existing.role === 'main') {
+    return false;
+  }
+  return segment.role === 'main' && Date.now() - event.occurredAtMs <= MAIN_RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 }
 
 function compareRecordingSegments(left: RecordingSegment, right: RecordingSegment) {
