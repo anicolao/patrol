@@ -237,6 +237,12 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: go2rtcViewer(streamName)
     });
   });
+  await page.route('**/api/recordings/thumbnail**', async (route) => {
+    await route.fulfill({
+      contentType: 'image/svg+xml',
+      body: recordingThumbnailSvg()
+    });
+  });
 
   await page.goto('/');
 
@@ -560,6 +566,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await page.getByRole('button', { name: /Vehicle/ }).click();
           await expect(page.getByTestId('recording-player')).toBeVisible();
+          await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
           await expect(page.getByTestId('recording-video')).toHaveAttribute(
             'src',
             /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
@@ -889,6 +896,18 @@ function go2rtcViewer(streamName: string) {
       </body>
     </html>
   `;
+}
+
+function recordingThumbnailSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="180" height="101" viewBox="0 0 180 101">
+    <rect width="180" height="101" fill="#1f2937"/>
+    <path d="M0 78h180v23H0z" fill="#4b5563"/>
+    <path d="M126 36h30v43h-30z" fill="#9ca3af"/>
+    <path d="M138 24h15v12h-15z" fill="#d1d5db"/>
+    <path d="M32 68h46l9 18H25z" fill="#cbd5e1"/>
+    <circle cx="56" cy="57" r="9" fill="#f8fafc"/>
+    <text x="12" y="20" fill="#f8fafc" font-family="Arial, sans-serif" font-size="12" font-weight="700">driveway</text>
+  </svg>`;
 }
 
 function configuredGo2rtc(configuredAtMs: number): DiscoveredCamera['go2rtc'] {
