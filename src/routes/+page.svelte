@@ -1567,14 +1567,20 @@
                     </div>
                   </div>
                   {#if person.references.length > 0}
-                    <div class="person-reference-strip" aria-label={`Reference ${person.displayLabel} samples`}>
-                      {#each person.references as reference}
-                        <img
-                          src={reference.cropUrl}
-                          alt={`Reference ${person.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
-                        />
-                      {/each}
-                    </div>
+	                    <div class="person-reference-strip" aria-label={`Reference ${person.displayLabel} samples`}>
+	                      {#each person.references as reference}
+	                        <button
+	                          type="button"
+	                          class="person-reference-thumb"
+	                          aria-label={`Preview reference ${person.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                        >
+	                          <img
+	                            src={reference.cropUrl}
+	                            alt={`Reference ${person.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                          />
+	                        </button>
+	                      {/each}
+	                    </div>
                   {:else}
                     <p class="notice compact">No reference crops are in the compact browser state.</p>
                   {/if}
@@ -1584,35 +1590,30 @@
           </section>
         {/if}
 
-        {#if reviewablePersonSamples.length > 0 || processingPersonItems.length > 0}
-          <div class="person-triage" aria-label="Person recognition triage">
-            {#if processingPersonItems.length > 0}
-              <section class="person-group processing-person-group" aria-label="Processing person labels">
-                <div class="person-group-header">
-                  <div>
-                    <h3>Processing</h3>
-                    <p>{processingPersonItems.length} queued action{processingPersonItems.length === 1 ? '' : 's'} waiting for the recognizer.</p>
-                  </div>
-                </div>
-                <ol class="person-grid" aria-label="Processing person label actions">
-                  {#each processingPersonItems as item}
-                    <li class:error={item.status === 'error'} class="person-card processing-person-card" data-testid="person-processing-card">
-                      <img src={item.sample.cropUrl} alt={`Queued person sample from ${formatDateTime(item.sample.occurredAtMs)}`} />
-                      <div class="person-card-body">
-                        <div>
-                          <h4>{item.action === 'label' ? `Labeling ${item.label}` : 'Assigning anonymous identity'}</h4>
-                          <p>
-                            {cameraById(item.sample.cameraId)?.name ?? cameraById(item.sample.cameraId)?.remoteAddress ?? 'Unknown camera'}
-                            · {formatDateTime(item.sample.occurredAtMs)}
-                          </p>
-                          <p class="suggestion">{item.message}</p>
-                        </div>
-                      </div>
-                    </li>
-                  {/each}
-                </ol>
-              </section>
-            {/if}
+        <div class="person-triage" aria-label="Person recognition triage">
+          <section class="processing-strip" aria-label="Processing person labels">
+            <div class="processing-strip-header">
+              <h3>Processing</h3>
+              <p>
+                {processingPersonItems.length === 0
+                  ? 'Idle'
+                  : `${processingPersonItems.length} queued action${processingPersonItems.length === 1 ? '' : 's'}`}
+              </p>
+            </div>
+            <ol class="processing-strip-list" aria-label="Processing person label actions">
+              {#if processingPersonItems.length > 0}
+                {#each processingPersonItems as item}
+                  <li class:error={item.status === 'error'} class="processing-strip-item" data-testid="person-processing-card">
+                    <img src={item.sample.cropUrl} alt={`Queued person sample from ${formatDateTime(item.sample.occurredAtMs)}`} />
+                    <span>{item.action === 'label' ? item.label : 'GUID'}</span>
+                    <small>{item.status === 'error' ? 'Error' : item.status === 'sending' ? 'Saving' : 'Queued'}</small>
+                  </li>
+                {/each}
+              {:else}
+                <li class="processing-strip-empty">No queued labeling work.</li>
+              {/if}
+            </ol>
+          </section>
 
             {#each highConfidencePersonGroups as group}
               <section class="person-group" aria-label={`High confidence ${group.displayLabel} samples`}>
@@ -1626,14 +1627,20 @@
                   </button>
                 </div>
                 {#if group.references.length > 0}
-                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
-                    {#each group.references as reference}
-                      <img
-                        src={reference.cropUrl}
-                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
-                      />
-                    {/each}
-                  </div>
+	                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+	                    {#each group.references as reference}
+	                      <button
+	                        type="button"
+	                        class="person-reference-thumb"
+	                        aria-label={`Preview reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                      >
+	                        <img
+	                          src={reference.cropUrl}
+	                          alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                        />
+	                      </button>
+	                    {/each}
+	                  </div>
                 {/if}
                 <ol class="person-grid" aria-label={`Recognized as ${group.displayLabel}`}>
                   {#each group.samples as sample}
@@ -1696,14 +1703,20 @@
                   </button>
                 </div>
                 {#if group.references.length > 0}
-                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
-                    {#each group.references as reference}
-                      <img
-                        src={reference.cropUrl}
-                        alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
-                      />
-                    {/each}
-                  </div>
+	                  <div class="person-reference-strip" aria-label={`Already labeled ${group.displayLabel} samples`}>
+	                    {#each group.references as reference}
+	                      <button
+	                        type="button"
+	                        class="person-reference-thumb"
+	                        aria-label={`Preview reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                      >
+	                        <img
+	                          src={reference.cropUrl}
+	                          alt={`Reference ${group.displayLabel} sample from ${formatDateTime(reference.occurredAtMs)}`}
+	                        />
+	                      </button>
+	                    {/each}
+	                  </div>
                 {/if}
                 <ol class="person-grid" aria-label={`Suggested ${group.displayLabel}`}>
                   {#each group.samples as sample}
@@ -1800,14 +1813,14 @@
               </section>
             {/if}
           </div>
+          {#if reviewablePersonSamples.length === 0 && processingPersonItems.length === 0}
+            <p class="notice">No current person crops are ready for review. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
+          {/if}
           <datalist id="known-person-labels">
             {#each visiblePersonLabels as label}
               <option value={label}></option>
             {/each}
           </datalist>
-        {:else}
-          <p class="notice">No current person crops are ready for review. The recognizer waits for camera-side person events and matching main-stream recordings.</p>
-        {/if}
       {:else}
         <p class="notice">Person recognition state has not been replayed yet.</p>
       {/if}
@@ -2744,9 +2757,91 @@
     padding: 14px;
   }
 
-  .processing-person-group {
-    border-color: #b6c6d6;
-    background: #f7fafc;
+  .processing-strip {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    min-height: 84px;
+    border: 1px solid #d9dde2;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px 12px;
+  }
+
+  .processing-strip-header {
+    display: grid;
+    gap: 2px;
+    min-width: 78px;
+  }
+
+  .processing-strip-header h3,
+  .processing-strip-header p {
+    margin-bottom: 0;
+  }
+
+  .processing-strip-header h3 {
+    font-size: 0.95rem;
+  }
+
+  .processing-strip-header p,
+  .processing-strip-item small,
+  .processing-strip-empty {
+    color: #66727f;
+    font-size: 0.74rem;
+    line-height: 1.25;
+  }
+
+  .processing-strip-list {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    min-height: 58px;
+    margin: 0;
+    overflow-x: auto;
+    padding: 0;
+    list-style: none;
+  }
+
+  .processing-strip-item {
+    display: grid;
+    justify-items: center;
+    gap: 2px;
+    width: 58px;
+    flex: 0 0 auto;
+    border-top: 3px solid #8fb1d0;
+    padding-top: 2px;
+  }
+
+  .processing-strip-item.error {
+    border-top-color: #c94f4f;
+  }
+
+  .processing-strip-item img {
+    width: 42px;
+    height: 42px;
+    border: 1px solid #d9dde2;
+    border-radius: 6px;
+    object-fit: contain;
+    background: #eef2f5;
+  }
+
+  .processing-strip-item span {
+    max-width: 58px;
+    overflow: hidden;
+    color: #1f2937;
+    font-size: 0.74rem;
+    font-weight: 750;
+    line-height: 1.1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .processing-strip-empty {
+    display: flex;
+    align-items: center;
+    min-height: 58px;
   }
 
   .person-group-header {
@@ -2769,19 +2864,46 @@
 
   .person-reference-strip {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
-    overflow-x: auto;
+    overflow: visible;
     padding-bottom: 2px;
+    position: relative;
   }
 
-  .person-reference-strip img {
+  .person-reference-thumb {
     width: 44px;
     height: 44px;
+    min-width: 0;
     flex: 0 0 auto;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    position: relative;
+  }
+
+  .person-reference-thumb img {
+    width: 44px;
+    height: 44px;
     border: 1px solid #d9dde2;
     border-radius: 6px;
     object-fit: contain;
     background: #f6f8fa;
+    cursor: zoom-in;
+    transition: box-shadow 120ms ease, transform 120ms ease;
+  }
+
+  .person-reference-thumb:hover img,
+  .person-reference-thumb:focus img {
+    position: relative;
+    z-index: 20;
+    background: #ffffff;
+    box-shadow: 0 8px 28px rgba(31, 41, 55, 0.24);
+    outline: 2px solid #1f4f82;
+    transform: scale(4);
+    transform-origin: top left;
   }
 
   .person-grid {
@@ -2800,15 +2922,6 @@
     border-radius: 8px;
     background: #f9fafb;
     padding: 10px;
-  }
-
-  .processing-person-card {
-    border-color: #c8d4df;
-  }
-
-  .processing-person-card.error {
-    border-color: #c94f4f;
-    background: #fff7f7;
   }
 
   .person-card > img {
