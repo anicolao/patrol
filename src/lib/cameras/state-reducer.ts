@@ -1272,6 +1272,9 @@ function personLabelCentroids(samples: PersonRecognitionSample[]) {
     if (!sample.label || !sample.embedding) {
       continue;
     }
+    if (sample.label.startsWith('anonymous:')) {
+      continue;
+    }
     vectorsByLabel.set(sample.label, [...(vectorsByLabel.get(sample.label) ?? []), sample.embedding.vector]);
   }
 
