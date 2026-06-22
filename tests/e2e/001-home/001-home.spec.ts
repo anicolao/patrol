@@ -447,7 +447,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('7/7 green');
+          await expect(page.getByTestId('process-score')).toHaveText('8/8 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -461,7 +461,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('Watchdog cron')).toBeVisible();
           await expect(page.getByText('Recording worker')).toBeVisible();
           await expect(page.getByText('Person recognition worker')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(7);
+          await expect(page.getByTestId('process-row')).toHaveCount(8);
         }
       },
       {
@@ -1159,6 +1159,17 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Records main and sub streams into retained video segments'
+    },
+    {
+      id: 'patrol-state-checkpoint',
+      label: 'State checkpoint worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
+      health: 'ok',
+      detail: 'Maintains server projection checkpoints for fast state reads'
     },
     {
       id: 'patrol-person-recognizer',

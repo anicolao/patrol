@@ -1,5 +1,5 @@
-import type { CameraDiscoveryState, RecordingSegment, ReviewableSecurityEvent } from '$lib/cameras/discovery';
-import type { CameraStateSnapshot } from '$lib/events';
+import type { CameraDiscoveryState, RecordingSegment, ReviewableSecurityEvent } from './discovery.ts';
+import type { CameraStateSnapshot } from '../events.ts';
 
 export const UI_RECORDING_EVENT_LIMIT = 500;
 export const UI_RECORDING_SEGMENT_LIMIT = 300;

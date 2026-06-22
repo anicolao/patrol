@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { EventCursor, PatrolEvent } from '$lib/events';
+import type { EventCursor, PatrolEvent } from '../events.ts';
 
 export interface EventFilePosition {
   file: string;

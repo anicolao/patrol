@@ -97,6 +97,14 @@
               node scripts/watchdog.mjs
             '';
           };
+          patrol-state-checkpoint = pkgs.writeShellApplication {
+            name = "patrol-state-checkpoint";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              node --experimental-strip-types scripts/state-checkpoint.ts
+            '';
+          };
           patrol-watchdog-cron-install = pkgs.writeShellApplication {
             name = "patrol-watchdog-cron-install";
             runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
@@ -129,6 +137,7 @@
               patrol-branch-audit
               patrol-person-recognizer
               patrol-recorder
+              patrol-state-checkpoint
               patrol-watchdog
               patrol-watchdog-cron-install
             ];
