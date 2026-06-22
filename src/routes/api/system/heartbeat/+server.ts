@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { currentCameraDiscoveryState } from '$lib/server/camera-events';
+import { currentCameraStateSnapshot } from '$lib/server/state-cache';
 import { appendSystemProcessHeartbeat } from '$lib/server/system-events';
 
 export async function POST({ url }) {
@@ -19,5 +19,6 @@ export async function POST({ url }) {
     });
   }
 
-  return json(await currentCameraDiscoveryState());
+  const snapshot = await currentCameraStateSnapshot();
+  return json(snapshot.state);
 }
