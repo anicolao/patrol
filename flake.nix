@@ -120,6 +120,16 @@
               node scripts/audit-branches.mjs "$@"
             '';
           };
+          patrol-activate-hikvision-camera = pkgs.writeShellApplication {
+            name = "patrol-activate-hikvision-camera";
+            runtimeInputs = [
+              pkgs.curl
+              pkgs.nodejs_24
+            ];
+            text = ''
+              node scripts/activate-hikvision-camera.mjs "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -130,6 +140,7 @@
               pkgs.go2rtc
               pkgs.nodejs_24
               patrol-annke-events
+              patrol-activate-hikvision-camera
               patrol-events-ws
               patrol-go2rtc-config
               patrol-go2rtc-observe
