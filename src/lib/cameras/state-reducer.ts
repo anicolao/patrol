@@ -18,15 +18,15 @@ import type {
   RecordingState,
   RecordingStreamRole,
   ReviewableSecurityEvent
-} from '$lib/cameras/discovery';
-import type { SystemProcessStatus } from '$lib/cameras/discovery';
+} from './discovery.ts';
+import type { SystemProcessStatus } from './discovery.ts';
 import {
   compareEventCursor,
   cursorForEvent,
   type CameraStateSnapshot,
   type PatrolEvent,
   type StreamedPatrolEvent
-} from '$lib/events';
+} from '../events.ts';
 
 const DISCOVERY_STALE_AFTER_MS = 60 * 60 * 1000;
 const PROCESS_STALE_AFTER_MS = 90 * 1000;
@@ -79,6 +79,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Records main and sub streams into retained video segments'
+  },
+  {
+    id: 'patrol-state-checkpoint',
+    label: 'State checkpoint worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Maintains server projection checkpoints for fast state reads'
   },
   {
     id: 'patrol-person-recognizer',

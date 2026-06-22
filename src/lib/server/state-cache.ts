@@ -1,14 +1,14 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CameraStateSnapshot, PatrolEvent } from '$lib/events';
-import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
-import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
+import type { CameraStateSnapshot, PatrolEvent } from '../events.ts';
+import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '../cameras/state-reducer.ts';
+import { compactCameraStateSnapshot } from '../cameras/state-compaction.ts';
 import {
   latestCursorForEvents,
   readEventsAfterPosition,
   readEventsWithPosition,
   type EventFilePosition
-} from '$lib/server/event-store';
+} from './event-store.ts';
 
 const CAMERA_STREAM = 'cameras';
 const SYSTEM_STREAM = 'system';
@@ -79,6 +79,39 @@ export async function currentCameraStateSnapshot(
   return responseSnapshot(snapshot, options);
 }
 
+export async function refreshCameraStateCheckpoint(options: { forceFullReplay?: boolean } = {}) {
+  if (options.forceFullReplay) {
+    return await writeFullStateSnapshot();
+  }
+
+  const baseSnapshot = await readCachedCameraStateSnapshot();
+  if (baseSnapshot?.serverCache?.version === 1) {
+    let snapshot: ServerCameraStateSnapshot = {
+      ...baseSnapshot
+    };
+    const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
+    for (const streamedEvent of streamedEvents) {
+      snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
+    }
+    const response: ServerCameraStateSnapshot = {
+      ...snapshot,
+      cachedAtMs: Date.now(),
+      serverCache: {
+        version: 1,
+        streamPositions
+      }
+    };
+    await writeStateSnapshot(response);
+    return {
+      snapshot: response,
+      replayedEvents: streamedEvents.length,
+      fullReplay: false
+    };
+  }
+
+  return await writeFullStateSnapshot();
+}
+
 export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<ServerCameraStateSnapshot | null> {
   try {
     const snapshot = JSON.parse(await readFile(await stateSnapshotPath(), 'utf8')) as ServerCameraStateSnapshot;
@@ -98,6 +131,30 @@ async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
   const snapshotPath = await stateSnapshotPath();
   await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
   await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function writeFullStateSnapshot() {
+  const {
+    cameraEvents,
+    systemEvents,
+    streamPositions
+  } = await readFullSnapshotInputs();
+  const events = [...cameraEvents, ...systemEvents];
+  const snapshot: ServerCameraStateSnapshot = {
+    state: reduceCameraDiscoveryEvents(cameraEvents, systemEvents),
+    cursor: latestCursorForEvents(events),
+    cachedAtMs: Date.now(),
+    serverCache: {
+      version: 1,
+      streamPositions
+    }
+  };
+  await writeStateSnapshot(snapshot);
+  return {
+    snapshot,
+    replayedEvents: events.length,
+    fullReplay: true
+  };
 }
 
 async function readFullSnapshotInputs() {
