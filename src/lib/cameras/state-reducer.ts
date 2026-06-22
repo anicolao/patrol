@@ -861,10 +861,7 @@ function withPersonRecognitionSampleAnalyzed(
   return withProcessEvent(
     {
       ...state,
-      people: rebuildPersonRecognitionSamples([
-        sample,
-        ...people.samples.filter((candidate) => candidate.id !== sample.id)
-      ])
+      people: upsertPersonRecognitionSample(people, sample)
     },
     'patrol-person-recognizer',
     {
@@ -919,10 +916,7 @@ function withPersonRecognitionSampleFailed(
   return withProcessEvent(
     {
       ...state,
-      people: rebuildPersonRecognitionSamples([
-        sample,
-        ...people.samples.filter((candidate) => candidate.id !== sample.id)
-      ])
+      people: upsertPersonRecognitionSample(people, sample)
     },
     'patrol-person-recognizer',
     {
@@ -1256,6 +1250,32 @@ function analyzedPersonSample(
   };
 }
 
+function upsertPersonRecognitionSample(
+  people: PersonRecognitionState,
+  sample: PersonRecognitionSample
+): PersonRecognitionState {
+  const existing = people.samples.find((candidate) => candidate.id === sample.id);
+  const samples = [sample, ...people.samples.filter((candidate) => candidate.id !== sample.id)];
+  const labelCounts = { ...people.labelCounts };
+  if (existing?.label && existing.label !== sample.label) {
+    labelCounts[existing.label] = Math.max(0, (labelCounts[existing.label] ?? 0) - 1);
+    if (labelCounts[existing.label] === 0) {
+      delete labelCounts[existing.label];
+    }
+  }
+  if (sample.label && existing?.label !== sample.label) {
+    labelCounts[sample.label] = (labelCounts[sample.label] ?? 0) + 1;
+  }
+
+  return {
+    samples,
+    labels: Array.from(new Set([...people.labels, ...Object.keys(labelCounts)])).filter((label) => (labelCounts[label] ?? 0) > 0).sort(),
+    labelCounts,
+    unlabeledCount: people.unlabeledCount + unlabeledDelta(existing, sample),
+    labeledCount: people.labeledCount + labeledDelta(existing, sample)
+  };
+}
+
 function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): PersonRecognitionState {
   const labeledSamples = samples.filter((sample) => sample.label && sample.embedding);
   const centroids = personLabelCentroids(labeledSamples);
@@ -1290,6 +1310,22 @@ function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): Pe
     ).length,
     labeledCount: refreshedSamples.filter((sample) => sample.label).length
   };
+}
+
+function unlabeledDelta(existing: PersonRecognitionSample | undefined, sample: PersonRecognitionSample) {
+  return unlabeledValue(sample) - unlabeledValue(existing);
+}
+
+function unlabeledValue(sample: PersonRecognitionSample | undefined) {
+  return sample && !sample.label && !sample.dismissedAtMs && sample.status === 'analyzed' ? 1 : 0;
+}
+
+function labeledDelta(existing: PersonRecognitionSample | undefined, sample: PersonRecognitionSample) {
+  return labeledValue(sample) - labeledValue(existing);
+}
+
+function labeledValue(sample: PersonRecognitionSample | undefined) {
+  return sample?.label ? 1 : 0;
 }
 
 function personLabelCentroids(samples: PersonRecognitionSample[]) {
