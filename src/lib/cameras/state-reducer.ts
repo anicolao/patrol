@@ -802,9 +802,12 @@ function withRecordingSegmentObserved(
     relativePath: event.payload.relativePath,
     observedAtMs: event.ts_ms
   };
-  const segments = [segment, ...state.recordings.segments.filter((candidate) => candidate.relativePath !== segment.relativePath)].sort(
-    compareRecordingSegments
-  );
+  const segments =
+    state.recordings.segments[0] && compareRecordingSegments(segment, state.recordings.segments[0]) > 0
+      ? [segment, ...state.recordings.segments].sort(compareRecordingSegments)
+      : [segment, ...state.recordings.segments];
+  const observedBytes =
+    state.recordings.storage.observedBytes + segment.sizeBytes;
 
   return withProcessEvent(
     {
@@ -812,7 +815,8 @@ function withRecordingSegmentObserved(
       recordings: recordingStateFromReviewedEvents(
         segments,
         refreshReviewEventsForSegment(state.recordings.events, segment),
-        state.devices.length
+        state.devices.length,
+        observedBytes
       )
     },
     'patrol-recorder',
@@ -830,10 +834,16 @@ function withRecordingSegmentExpired(
   state: CameraDiscoveryState,
   event: PatrolEvent<RecordingSegmentExpiredPayload>
 ): CameraDiscoveryState {
+  const expiredSegment = state.recordings.segments.find((segment) => segment.relativePath === event.payload.relativePath);
   const segments = state.recordings.segments.filter((segment) => segment.relativePath !== event.payload.relativePath);
   return {
     ...state,
-    recordings: rebuildRecordingState(segments, state.recordings.events, state.devices.length)
+    recordings: rebuildRecordingState(
+      segments,
+      state.recordings.events,
+      state.devices.length,
+      Math.max(0, state.recordings.storage.observedBytes - (expiredSegment?.sizeBytes ?? 0))
+    )
   };
 }
 
@@ -1425,7 +1435,8 @@ function recordingEventLabel(targetType: string | null, eventType: string | null
 function rebuildRecordingState(
   segments: RecordingSegment[],
   events: ReviewableSecurityEvent[],
-  cameraCount: number
+  cameraCount: number,
+  observedBytes?: number
 ): RecordingState {
   const sortedSegments = [...segments].sort(compareRecordingSegments);
   const refreshedEvents = events
@@ -1435,13 +1446,14 @@ function rebuildRecordingState(
     }))
     .sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id));
 
-  return recordingStateFromReviewedEvents(sortedSegments, refreshedEvents, cameraCount);
+  return recordingStateFromReviewedEvents(sortedSegments, refreshedEvents, cameraCount, observedBytes);
 }
 
 function recordingStateFromReviewedEvents(
   segments: RecordingSegment[],
   events: ReviewableSecurityEvent[],
-  cameraCount: number
+  cameraCount: number,
+  observedBytes = segments.reduce((total, segment) => total + segment.sizeBytes, 0)
 ): RecordingState {
   return {
     segments,
@@ -1455,7 +1467,7 @@ function recordingStateFromReviewedEvents(
       totalEstimatedBytes:
         estimateBytes(cameraCount, MAIN_ESTIMATED_BITS_PER_SECOND, MAIN_RECORDING_RETENTION_DAYS) +
         estimateBytes(cameraCount, SUB_ESTIMATED_BITS_PER_SECOND, SUB_RECORDING_RETENTION_DAYS),
-      observedBytes: segments.reduce((total, segment) => total + segment.sizeBytes, 0)
+      observedBytes
     }
   };
 }
