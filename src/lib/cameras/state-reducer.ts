@@ -770,7 +770,12 @@ function withAnnkeAlertStreamMessageReceived(
     {
       ...state,
       devices,
-      recordings: rebuildRecordingState(state.recordings.segments, reviewEvents, devices.length)
+      recordings: recordingStateFromReviewedEvents(
+        state.recordings.segments,
+        reviewEvents,
+        devices.length,
+        state.recordings.storage.observedBytes
+      )
     },
     'patrol-annke-events',
     {
@@ -1401,15 +1406,18 @@ function preferredSegmentForEvent(segments: RecordingSegment[], cameraId: string
     ageMs <= MAIN_RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000 ? ['main', 'sub'] : ['sub'];
 
   for (const role of preferredRoles) {
-    const segment = segments.find(
-      (candidate) =>
+    for (const candidate of segments) {
+      if (candidate.endMs < occurredAtMs) {
+        break;
+      }
+      if (
         candidate.cameraId === cameraId &&
         candidate.role === role &&
         occurredAtMs >= candidate.startMs &&
         occurredAtMs <= candidate.endMs
-    );
-    if (segment) {
-      return segment;
+      ) {
+        return candidate;
+      }
     }
   }
 
