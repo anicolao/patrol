@@ -1022,18 +1022,78 @@
       endMs,
       heightPx,
       groups,
-      segments: segments
-        .map((segment) => ({
-          id: segment.relativePath,
-          cameraId: segment.cameraId,
-          role: segment.role,
-          startMs: segment.startMs,
-          endMs: segment.endMs,
-          segment
-        }))
-        .sort((left, right) => right.endMs - left.endMs || left.id.localeCompare(right.id)),
+      segments: preferredHistoryAvailabilitySegments(segments),
       ticks: historyTimelineTicks(startMs, endMs)
     };
+  }
+
+  function preferredHistoryAvailabilitySegments(segments: RecordingSegment[]): HistoryTimelineSegment[] {
+    const mainSegments = segments.filter((segment) => segment.role === 'main');
+    const mainSegmentsByCamera = new Map<string, RecordingSegment[]>();
+    for (const segment of mainSegments) {
+      mainSegmentsByCamera.set(segment.cameraId, [...(mainSegmentsByCamera.get(segment.cameraId) ?? []), segment]);
+    }
+    for (const cameraSegments of mainSegmentsByCamera.values()) {
+      cameraSegments.sort((left, right) => left.startMs - right.startMs);
+    }
+    const preferredSegments = [
+      ...mainSegments,
+      ...segments.filter((segment) => {
+        if (segment.role !== 'sub') {
+          return false;
+        }
+        const midpointMs = segment.startMs + segment.durationMs / 2;
+        return !cameraHasMainSegmentAt(mainSegmentsByCamera.get(segment.cameraId) ?? [], midpointMs);
+      })
+    ].sort(
+      (left, right) =>
+        left.cameraId.localeCompare(right.cameraId) ||
+        left.role.localeCompare(right.role) ||
+        left.startMs - right.startMs ||
+        left.relativePath.localeCompare(right.relativePath)
+    );
+
+    const merged: HistoryTimelineSegment[] = [];
+    for (const segment of preferredSegments) {
+      const previous = merged.at(-1);
+      if (
+        previous &&
+        previous.cameraId === segment.cameraId &&
+        previous.role === segment.role &&
+        segment.startMs - previous.endMs <= 20_000
+      ) {
+        previous.endMs = Math.max(previous.endMs, segment.endMs);
+        continue;
+      }
+
+      merged.push({
+        id: segment.relativePath,
+        cameraId: segment.cameraId,
+        role: segment.role,
+        startMs: segment.startMs,
+        endMs: segment.endMs,
+        segment
+      });
+    }
+
+    return merged.sort((left, right) => right.endMs - left.endMs || left.id.localeCompare(right.id));
+  }
+
+  function cameraHasMainSegmentAt(segments: RecordingSegment[], timeMs: number) {
+    let low = 0;
+    let high = segments.length - 1;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const segment = segments[middle];
+      if (timeMs < segment.startMs) {
+        high = middle - 1;
+      } else if (timeMs > segment.endMs) {
+        low = middle + 1;
+      } else {
+        return true;
+      }
+    }
+    return false;
   }
 
   function historyTimelineHeight(durationMs: number) {
@@ -1471,7 +1531,7 @@
         camera,
         previewSegment,
         playbackSegment,
-        previewThumbnailUrl: previewSegment ? recordingThumbnailUrl(previewSegment, previewSegment.startMs) : null,
+        previewThumbnailUrl: previewSegment && previewTimeMs !== null ? recordingThumbnailUrl(previewSegment, previewTimeMs) : null,
         playbackSource: playbackSegment && playbackTimeMs !== null ? recordingSegmentSource(playbackSegment, playbackTimeMs) : null,
         previewQuality: recordingQualityLabelForSegment(previewSegment),
         playbackQuality: recordingQualityLabelForSegment(playbackSegment)

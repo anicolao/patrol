@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { CameraStateSnapshot, PatrolEvent } from '../events.ts';
 import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '../cameras/state-reducer.ts';
@@ -130,7 +130,9 @@ export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number
 async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
   const snapshotPath = await stateSnapshotPath();
   await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
-  await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const temporaryPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await rename(temporaryPath, snapshotPath);
 }
 
 async function writeFullStateSnapshot() {
