@@ -97,6 +97,14 @@
               node scripts/watchdog.mjs
             '';
           };
+          patrol-state-checkpoint = pkgs.writeShellApplication {
+            name = "patrol-state-checkpoint";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              node --experimental-strip-types scripts/state-checkpoint.ts
+            '';
+          };
           patrol-watchdog-cron-install = pkgs.writeShellApplication {
             name = "patrol-watchdog-cron-install";
             runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
@@ -112,6 +120,16 @@
               node scripts/audit-branches.mjs "$@"
             '';
           };
+          patrol-activate-hikvision-camera = pkgs.writeShellApplication {
+            name = "patrol-activate-hikvision-camera";
+            runtimeInputs = [
+              pkgs.curl
+              pkgs.nodejs_24
+            ];
+            text = ''
+              node scripts/activate-hikvision-camera.mjs "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -122,6 +140,7 @@
               pkgs.go2rtc
               pkgs.nodejs_24
               patrol-annke-events
+              patrol-activate-hikvision-camera
               patrol-events-ws
               patrol-go2rtc-config
               patrol-go2rtc-observe
@@ -129,6 +148,7 @@
               patrol-branch-audit
               patrol-person-recognizer
               patrol-recorder
+              patrol-state-checkpoint
               patrol-watchdog
               patrol-watchdog-cron-install
             ];

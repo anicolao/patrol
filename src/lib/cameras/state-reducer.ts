@@ -18,15 +18,15 @@ import type {
   RecordingState,
   RecordingStreamRole,
   ReviewableSecurityEvent
-} from '$lib/cameras/discovery';
-import type { SystemProcessStatus } from '$lib/cameras/discovery';
+} from './discovery.ts';
+import type { SystemProcessStatus } from './discovery.ts';
 import {
   compareEventCursor,
   cursorForEvent,
   type CameraStateSnapshot,
   type PatrolEvent,
   type StreamedPatrolEvent
-} from '$lib/events';
+} from '../events.ts';
 
 const DISCOVERY_STALE_AFTER_MS = 60 * 60 * 1000;
 const PROCESS_STALE_AFTER_MS = 90 * 1000;
@@ -79,6 +79,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Records main and sub streams into retained video segments'
+  },
+  {
+    id: 'patrol-state-checkpoint',
+    label: 'State checkpoint worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Maintains server projection checkpoints for fast state reads'
   },
   {
     id: 'patrol-person-recognizer',
@@ -763,7 +770,12 @@ function withAnnkeAlertStreamMessageReceived(
     {
       ...state,
       devices,
-      recordings: rebuildRecordingState(state.recordings.segments, reviewEvents, devices.length)
+      recordings: recordingStateFromReviewedEvents(
+        state.recordings.segments,
+        reviewEvents,
+        devices.length,
+        state.recordings.storage.observedBytes
+      )
     },
     'patrol-annke-events',
     {
@@ -795,9 +807,12 @@ function withRecordingSegmentObserved(
     relativePath: event.payload.relativePath,
     observedAtMs: event.ts_ms
   };
-  const segments = [segment, ...state.recordings.segments.filter((candidate) => candidate.relativePath !== segment.relativePath)].sort(
-    compareRecordingSegments
-  );
+  const segments =
+    state.recordings.segments[0] && compareRecordingSegments(segment, state.recordings.segments[0]) > 0
+      ? [segment, ...state.recordings.segments].sort(compareRecordingSegments)
+      : [segment, ...state.recordings.segments];
+  const observedBytes =
+    state.recordings.storage.observedBytes + segment.sizeBytes;
 
   return withProcessEvent(
     {
@@ -805,7 +820,8 @@ function withRecordingSegmentObserved(
       recordings: recordingStateFromReviewedEvents(
         segments,
         refreshReviewEventsForSegment(state.recordings.events, segment),
-        state.devices.length
+        state.devices.length,
+        observedBytes
       )
     },
     'patrol-recorder',
@@ -823,10 +839,16 @@ function withRecordingSegmentExpired(
   state: CameraDiscoveryState,
   event: PatrolEvent<RecordingSegmentExpiredPayload>
 ): CameraDiscoveryState {
+  const expiredSegment = state.recordings.segments.find((segment) => segment.relativePath === event.payload.relativePath);
   const segments = state.recordings.segments.filter((segment) => segment.relativePath !== event.payload.relativePath);
   return {
     ...state,
-    recordings: rebuildRecordingState(segments, state.recordings.events, state.devices.length)
+    recordings: rebuildRecordingState(
+      segments,
+      state.recordings.events,
+      state.devices.length,
+      Math.max(0, state.recordings.storage.observedBytes - (expiredSegment?.sizeBytes ?? 0))
+    )
   };
 }
 
@@ -839,10 +861,7 @@ function withPersonRecognitionSampleAnalyzed(
   return withProcessEvent(
     {
       ...state,
-      people: rebuildPersonRecognitionSamples([
-        sample,
-        ...people.samples.filter((candidate) => candidate.id !== sample.id)
-      ])
+      people: upsertPersonRecognitionSample(people, sample)
     },
     'patrol-person-recognizer',
     {
@@ -897,10 +916,7 @@ function withPersonRecognitionSampleFailed(
   return withProcessEvent(
     {
       ...state,
-      people: rebuildPersonRecognitionSamples([
-        sample,
-        ...people.samples.filter((candidate) => candidate.id !== sample.id)
-      ])
+      people: upsertPersonRecognitionSample(people, sample)
     },
     'patrol-person-recognizer',
     {
@@ -1234,6 +1250,32 @@ function analyzedPersonSample(
   };
 }
 
+function upsertPersonRecognitionSample(
+  people: PersonRecognitionState,
+  sample: PersonRecognitionSample
+): PersonRecognitionState {
+  const existing = people.samples.find((candidate) => candidate.id === sample.id);
+  const samples = [sample, ...people.samples.filter((candidate) => candidate.id !== sample.id)];
+  const labelCounts = { ...people.labelCounts };
+  if (existing?.label && existing.label !== sample.label) {
+    labelCounts[existing.label] = Math.max(0, (labelCounts[existing.label] ?? 0) - 1);
+    if (labelCounts[existing.label] === 0) {
+      delete labelCounts[existing.label];
+    }
+  }
+  if (sample.label && existing?.label !== sample.label) {
+    labelCounts[sample.label] = (labelCounts[sample.label] ?? 0) + 1;
+  }
+
+  return {
+    samples,
+    labels: Array.from(new Set([...people.labels, ...Object.keys(labelCounts)])).filter((label) => (labelCounts[label] ?? 0) > 0).sort(),
+    labelCounts,
+    unlabeledCount: people.unlabeledCount + unlabeledDelta(existing, sample),
+    labeledCount: people.labeledCount + labeledDelta(existing, sample)
+  };
+}
+
 function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): PersonRecognitionState {
   const labeledSamples = samples.filter((sample) => sample.label && sample.embedding);
   const centroids = personLabelCentroids(labeledSamples);
@@ -1268,6 +1310,22 @@ function rebuildPersonRecognitionSamples(samples: PersonRecognitionSample[]): Pe
     ).length,
     labeledCount: refreshedSamples.filter((sample) => sample.label).length
   };
+}
+
+function unlabeledDelta(existing: PersonRecognitionSample | undefined, sample: PersonRecognitionSample) {
+  return unlabeledValue(sample) - unlabeledValue(existing);
+}
+
+function unlabeledValue(sample: PersonRecognitionSample | undefined) {
+  return sample && !sample.label && !sample.dismissedAtMs && sample.status === 'analyzed' ? 1 : 0;
+}
+
+function labeledDelta(existing: PersonRecognitionSample | undefined, sample: PersonRecognitionSample) {
+  return labeledValue(sample) - labeledValue(existing);
+}
+
+function labeledValue(sample: PersonRecognitionSample | undefined) {
+  return sample?.label ? 1 : 0;
 }
 
 function personLabelCentroids(samples: PersonRecognitionSample[]) {
@@ -1384,15 +1442,18 @@ function preferredSegmentForEvent(segments: RecordingSegment[], cameraId: string
     ageMs <= MAIN_RECORDING_RETENTION_DAYS * 24 * 60 * 60 * 1000 ? ['main', 'sub'] : ['sub'];
 
   for (const role of preferredRoles) {
-    const segment = segments.find(
-      (candidate) =>
+    for (const candidate of segments) {
+      if (candidate.endMs < occurredAtMs) {
+        break;
+      }
+      if (
         candidate.cameraId === cameraId &&
         candidate.role === role &&
         occurredAtMs >= candidate.startMs &&
         occurredAtMs <= candidate.endMs
-    );
-    if (segment) {
-      return segment;
+      ) {
+        return candidate;
+      }
     }
   }
 
@@ -1418,7 +1479,8 @@ function recordingEventLabel(targetType: string | null, eventType: string | null
 function rebuildRecordingState(
   segments: RecordingSegment[],
   events: ReviewableSecurityEvent[],
-  cameraCount: number
+  cameraCount: number,
+  observedBytes?: number
 ): RecordingState {
   const sortedSegments = [...segments].sort(compareRecordingSegments);
   const refreshedEvents = events
@@ -1428,13 +1490,14 @@ function rebuildRecordingState(
     }))
     .sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id));
 
-  return recordingStateFromReviewedEvents(sortedSegments, refreshedEvents, cameraCount);
+  return recordingStateFromReviewedEvents(sortedSegments, refreshedEvents, cameraCount, observedBytes);
 }
 
 function recordingStateFromReviewedEvents(
   segments: RecordingSegment[],
   events: ReviewableSecurityEvent[],
-  cameraCount: number
+  cameraCount: number,
+  observedBytes = segments.reduce((total, segment) => total + segment.sizeBytes, 0)
 ): RecordingState {
   return {
     segments,
@@ -1448,27 +1511,36 @@ function recordingStateFromReviewedEvents(
       totalEstimatedBytes:
         estimateBytes(cameraCount, MAIN_ESTIMATED_BITS_PER_SECOND, MAIN_RECORDING_RETENTION_DAYS) +
         estimateBytes(cameraCount, SUB_ESTIMATED_BITS_PER_SECOND, SUB_RECORDING_RETENTION_DAYS),
-      observedBytes: segments.reduce((total, segment) => total + segment.sizeBytes, 0)
+      observedBytes
     }
   };
 }
 
 function refreshReviewEventsForSegment(events: ReviewableSecurityEvent[], segment: RecordingSegment) {
-  return events.map((event) => {
+  let updatedEvents: ReviewableSecurityEvent[] | null = null;
+
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (event.occurredAtMs < segment.startMs) {
+      break;
+    }
+
     if (
       event.cameraId !== segment.cameraId ||
-      event.occurredAtMs < segment.startMs ||
       event.occurredAtMs > segment.endMs ||
       !segmentPreferredForEvent(event, segment)
     ) {
-      return event;
+      continue;
     }
 
-    return {
+    updatedEvents ??= [...events];
+    updatedEvents[index] = {
       ...event,
       preferredSegment: segment
     };
-  });
+  }
+
+  return updatedEvents ?? events;
 }
 
 function segmentPreferredForEvent(event: ReviewableSecurityEvent, segment: RecordingSegment) {

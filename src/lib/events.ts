@@ -1,4 +1,4 @@
-import type { CameraDiscoveryState } from '$lib/cameras/discovery';
+import type { CameraDiscoveryState } from './cameras/discovery.ts';
 
 export interface PatrolEvent<TPayload = unknown> {
   id: string;

@@ -1,21 +1,21 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { CameraStateSnapshot, PatrolEvent } from '$lib/events';
-import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '$lib/cameras/state-reducer';
-import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
+import type { CameraStateSnapshot, PatrolEvent } from '../events.ts';
+import { reduceCameraDiscoveryEvents, reduceCameraStateSnapshotEvent } from '../cameras/state-reducer.ts';
+import { compactCameraStateSnapshot } from '../cameras/state-compaction.ts';
 import {
   latestCursorForEvents,
   readEventsAfterPosition,
   readEventsWithPosition,
   type EventFilePosition
-} from '$lib/server/event-store';
+} from './event-store.ts';
 
 const CAMERA_STREAM = 'cameras';
 const SYSTEM_STREAM = 'system';
 const SNAPSHOT_STREAMS = [CAMERA_STREAM, SYSTEM_STREAM];
-const SERVER_STATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 const SERVER_STATE_CHECKPOINT_REWRITE_MS = 5 * 60 * 1000;
 const SERVER_STATE_CHECKPOINT_TAIL_EVENT_LIMIT = 1000;
+const SERVER_STATE_REQUEST_REPLAY_EVENT_LIMIT = 1000;
 
 interface ServerCameraStateSnapshot extends CameraStateSnapshot {
   serverCache?: {
@@ -24,11 +24,13 @@ interface ServerCameraStateSnapshot extends CameraStateSnapshot {
   };
 }
 
-export async function currentCameraStateSnapshot(options: { forceRefresh?: boolean } = {}): Promise<CameraStateSnapshot> {
+export async function currentCameraStateSnapshot(
+  options: { forceRefresh?: boolean; compactForClient?: boolean } = {}
+): Promise<CameraStateSnapshot> {
   if (!options.forceRefresh) {
-    const cached = await readCachedCameraStateSnapshot({ maxAgeMs: SERVER_STATE_CACHE_MAX_AGE_MS });
+    const cached = await readCachedCameraStateSnapshot();
     if (cached) {
-      return responseSnapshot(cached);
+      return responseSnapshot(cached, options);
     }
   }
 
@@ -38,6 +40,9 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
       ...baseSnapshot
     };
     const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
+    if (streamedEvents.length > SERVER_STATE_REQUEST_REPLAY_EVENT_LIMIT) {
+      return responseSnapshot(baseSnapshot, options);
+    }
     for (const streamedEvent of streamedEvents) {
       snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
     }
@@ -52,7 +57,7 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
     if (shouldRewriteCheckpoint(baseSnapshot, streamedEvents.length)) {
       await writeStateSnapshot(response);
     }
-    return responseSnapshot(response);
+    return responseSnapshot(response, options);
   }
 
   const {
@@ -71,7 +76,40 @@ export async function currentCameraStateSnapshot(options: { forceRefresh?: boole
     }
   };
   await writeStateSnapshot(snapshot);
-  return responseSnapshot(snapshot);
+  return responseSnapshot(snapshot, options);
+}
+
+export async function refreshCameraStateCheckpoint(options: { forceFullReplay?: boolean } = {}) {
+  if (options.forceFullReplay) {
+    return await writeFullStateSnapshot();
+  }
+
+  const baseSnapshot = await readCachedCameraStateSnapshot();
+  if (baseSnapshot?.serverCache?.version === 1) {
+    let snapshot: ServerCameraStateSnapshot = {
+      ...baseSnapshot
+    };
+    const { streamedEvents, streamPositions } = await readStreamedEventsAfterPositions(baseSnapshot.serverCache.streamPositions);
+    for (const streamedEvent of streamedEvents) {
+      snapshot = reduceCameraStateSnapshotEvent(snapshot, streamedEvent);
+    }
+    const response: ServerCameraStateSnapshot = {
+      ...snapshot,
+      cachedAtMs: Date.now(),
+      serverCache: {
+        version: 1,
+        streamPositions
+      }
+    };
+    await writeStateSnapshot(response);
+    return {
+      snapshot: response,
+      replayedEvents: streamedEvents.length,
+      fullReplay: false
+    };
+  }
+
+  return await writeFullStateSnapshot();
 }
 
 export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number } = {}): Promise<ServerCameraStateSnapshot | null> {
@@ -92,7 +130,33 @@ export async function readCachedCameraStateSnapshot(options: { maxAgeMs?: number
 async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
   const snapshotPath = await stateSnapshotPath();
   await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
-  await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const temporaryPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await rename(temporaryPath, snapshotPath);
+}
+
+async function writeFullStateSnapshot() {
+  const {
+    cameraEvents,
+    systemEvents,
+    streamPositions
+  } = await readFullSnapshotInputs();
+  const events = [...cameraEvents, ...systemEvents];
+  const snapshot: ServerCameraStateSnapshot = {
+    state: reduceCameraDiscoveryEvents(cameraEvents, systemEvents),
+    cursor: latestCursorForEvents(events),
+    cachedAtMs: Date.now(),
+    serverCache: {
+      version: 1,
+      streamPositions
+    }
+  };
+  await writeStateSnapshot(snapshot);
+  return {
+    snapshot,
+    replayedEvents: events.length,
+    fullReplay: true
+  };
 }
 
 async function readFullSnapshotInputs() {
@@ -129,9 +193,12 @@ async function readStreamedEventsAfterPositions(streamPositions: Record<string, 
   };
 }
 
-function responseSnapshot(snapshot: ServerCameraStateSnapshot): CameraStateSnapshot {
+function responseSnapshot(
+  snapshot: ServerCameraStateSnapshot,
+  options: { compactForClient?: boolean } = {}
+): CameraStateSnapshot {
   const { serverCache: _serverCache, ...clientSnapshot } = snapshot;
-  return compactCameraStateSnapshot(clientSnapshot);
+  return options.compactForClient === false ? clientSnapshot : compactCameraStateSnapshot(clientSnapshot);
 }
 
 function shouldRewriteCheckpoint(snapshot: ServerCameraStateSnapshot, tailEventCount: number) {

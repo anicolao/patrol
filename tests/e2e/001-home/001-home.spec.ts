@@ -237,6 +237,28 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: go2rtcViewer(streamName)
     });
   });
+  await page.route('**/api/recordings/thumbnail**', async (route) => {
+    await route.fulfill({
+      contentType: 'image/svg+xml',
+      body: recordingThumbnailSvg()
+    });
+  });
+  await page.route('**/api/recordings/history**', async (route) => {
+    const recordings = recordingState(fixedNowMs - 4000);
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        startMs: fixedNowMs - 6 * 60 * 60 * 1000,
+        endMs: fixedNowMs,
+        availableStartMs: recordings.segments[0].startMs,
+        availableEndMs: recordings.segments[0].endMs,
+        hasOlder: false,
+        hasNewer: false,
+        segments: recordings.segments,
+        events: recordings.events
+      })
+    });
+  });
 
   await page.goto('/');
 
@@ -425,7 +447,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Server task dashboard is green',
         check: async () => {
           await expect(page.getByTestId('process-dashboard')).toBeVisible();
-          await expect(page.getByTestId('process-score')).toHaveText('7/7 green');
+          await expect(page.getByTestId('process-score')).toHaveText('8/8 green');
           await expect(page.getByText('All server tasks are green.')).toBeVisible();
         }
       },
@@ -439,7 +461,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(page.getByText('Watchdog cron')).toBeVisible();
           await expect(page.getByText('Recording worker')).toBeVisible();
           await expect(page.getByText('Person recognition worker')).toBeVisible();
-          await expect(page.getByTestId('process-row')).toHaveCount(7);
+          await expect(page.getByTestId('process-row')).toHaveCount(8);
         }
       },
       {
@@ -560,6 +582,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await page.getByRole('button', { name: /Vehicle/ }).click();
           await expect(page.getByTestId('recording-player')).toBeVisible();
+          await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
           await expect(page.getByTestId('recording-video')).toHaveAttribute(
             'src',
             /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
@@ -891,6 +914,18 @@ function go2rtcViewer(streamName: string) {
   `;
 }
 
+function recordingThumbnailSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="180" height="101" viewBox="0 0 180 101">
+    <rect width="180" height="101" fill="#1f2937"/>
+    <path d="M0 78h180v23H0z" fill="#4b5563"/>
+    <path d="M126 36h30v43h-30z" fill="#9ca3af"/>
+    <path d="M138 24h15v12h-15z" fill="#d1d5db"/>
+    <path d="M32 68h46l9 18H25z" fill="#cbd5e1"/>
+    <circle cx="56" cy="57" r="9" fill="#f8fafc"/>
+    <text x="12" y="20" fill="#f8fafc" font-family="Arial, sans-serif" font-size="12" font-weight="700">driveway</text>
+  </svg>`;
+}
+
 function configuredGo2rtc(configuredAtMs: number): DiscoveredCamera['go2rtc'] {
   return {
     configuredAtMs,
@@ -1124,6 +1159,17 @@ function systemProcesses(lastAliveAtMs: number): CameraDiscoveryState['processes
       gitRevision: 'test-revision',
       health: 'ok',
       detail: 'Records main and sub streams into retained video segments'
+    },
+    {
+      id: 'patrol-state-checkpoint',
+      label: 'State checkpoint worker',
+      kind: 'worker',
+      expectedEveryMs: 90000,
+      lastAliveAtMs,
+      lastEventType: 'system.process.heartbeat',
+      gitRevision: 'test-revision',
+      health: 'ok',
+      detail: 'Maintains server projection checkpoints for fast state reads'
     },
     {
       id: 'patrol-person-recognizer',
