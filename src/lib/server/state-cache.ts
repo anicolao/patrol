@@ -131,7 +131,8 @@ async function writeStateSnapshot(snapshot: CameraStateSnapshot) {
   const snapshotPath = await stateSnapshotPath();
   await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
   const temporaryPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(snapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const compactedSnapshot = compactCameraStateSnapshot(snapshot) as ServerCameraStateSnapshot;
+  await writeFile(temporaryPath, `${JSON.stringify(compactedSnapshot)}\n`, { encoding: 'utf8', mode: 0o600 });
   await rename(temporaryPath, snapshotPath);
 }
 
