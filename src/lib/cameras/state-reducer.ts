@@ -114,6 +114,16 @@ export interface CameraCredentialsSavedPayload {
   secretStoredAtMs: number;
 }
 
+export interface CameraAddressRediscoveredPayload {
+  cameraId: string;
+  previousHost: string;
+  rediscoveredHost: string;
+  previousRemoteAddress: string | null;
+  endpoint: string | null;
+  name: string | null;
+  hardware: string | null;
+}
+
 interface SystemProcessHeartbeatPayload {
   processId: string;
   label: string;
@@ -513,6 +523,8 @@ function reduceCameraDiscoveryStateEvent(
       return withDiscoveryCompleted(state, event as PatrolEvent<DiscoveryCompletedPayload>);
     case 'camera.credentials.saved':
       return withCameraCredentialsSaved(state, event as PatrolEvent<CameraCredentialsSavedPayload>);
+    case 'camera.address.rediscovered':
+      return state;
     case 'go2rtc.config.materialized':
       return withGo2rtcConfigMaterialized(state, event as PatrolEvent<Go2rtcConfigMaterializedPayload>);
     case 'go2rtc.streams.observed':
