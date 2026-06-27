@@ -1,41 +1,80 @@
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { appendProcessExited, startProcessHeartbeats } from './lib/patrol-events.mjs';
 
 const configPath = await materializeConfig();
+let configText = await readConfig(configPath);
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-go2rtc',
   label: 'go2rtc stream server',
   kind: 'server',
   detail: `Serving streams from ${configPath}`
 });
+const configRefreshMs = Number(process.env.PATROL_GO2RTC_CONFIG_REFRESH_MS ?? '10000');
+let restartingForConfig = false;
+let shuttingDown = false;
 
-const child = spawn('go2rtc', ['-c', configPath], {
-  stdio: 'inherit'
-});
+let child = startGo2rtc(configPath);
+let refresh = setInterval(() => {
+  void refreshConfig();
+}, configRefreshMs);
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
+    shuttingDown = true;
+    clearInterval(refresh);
     child.kill(signal);
   });
 }
 
-child.on('exit', (exitCode, signal) => {
-  clearInterval(heartbeat);
-  void appendProcessExited({
-    processId: 'patrol-go2rtc',
-    label: 'go2rtc stream server',
-    kind: 'server',
-    exitCode,
-    signal,
-    detail: `go2rtc exited after serving ${configPath}`
-  }).finally(() => {
-    if (signal) {
-      process.exit(128 + signalNumber(signal));
+function startGo2rtc(path) {
+  const childProcess = spawn('go2rtc', ['-c', path], {
+    stdio: 'inherit'
+  });
+
+  childProcess.on('exit', (exitCode, signal) => {
+    if (restartingForConfig && !shuttingDown) {
+      restartingForConfig = false;
+      child = startGo2rtc(configPath);
       return;
     }
-    process.exit(exitCode ?? 0);
+
+    clearInterval(refresh);
+    clearInterval(heartbeat);
+    void appendProcessExited({
+      processId: 'patrol-go2rtc',
+      label: 'go2rtc stream server',
+      kind: 'server',
+      exitCode,
+      signal,
+      detail: `go2rtc exited after serving ${configPath}`
+    }).finally(() => {
+      if (signal) {
+        globalThis.process.exit(128 + signalNumber(signal));
+        return;
+      }
+      globalThis.process.exit(exitCode ?? 0);
+    });
   });
-});
+
+  return childProcess;
+}
+
+async function refreshConfig() {
+  const nextConfigPath = await materializeConfig();
+  const nextConfigText = await readConfig(nextConfigPath);
+  if (nextConfigText === configText) {
+    return;
+  }
+
+  configText = nextConfigText;
+  restartingForConfig = true;
+  child.kill('SIGTERM');
+}
+
+async function readConfig(path) {
+  return await readFile(path, 'utf8');
+}
 
 async function materializeConfig() {
   const childProcess = spawn(process.execPath, ['scripts/write-go2rtc-config.mjs'], {

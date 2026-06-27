@@ -18,28 +18,39 @@ const config = renderConfig(configured, secrets);
 
 await mkdir(go2rtcDir, { recursive: true, mode: 0o700 });
 const configPath = path.join(go2rtcDir, 'go2rtc.yaml');
-await writeFile(configPath, config, { encoding: 'utf8', mode: 0o600 });
-await appendCameraEvent({
-  type: 'go2rtc.config.materialized',
-  source: 'patrol-go2rtc-config',
-  payload: {
-    apiBaseUrl: go2rtcApiBaseUrl,
-    configPath,
-    streams: configured.flatMap((camera) => [
-      {
-        cameraId: camera.id,
-        role: 'main',
-        streamName: camera.streams.main
-      },
-      {
-        cameraId: camera.id,
-        role: 'sub',
-        streamName: camera.streams.sub
-      }
-    ])
-  }
-});
+const previousConfig = await readTextFile(configPath);
+if (previousConfig !== config) {
+  await writeFile(configPath, config, { encoding: 'utf8', mode: 0o600 });
+  await appendCameraEvent({
+    type: 'go2rtc.config.materialized',
+    source: 'patrol-go2rtc-config',
+    payload: {
+      apiBaseUrl: go2rtcApiBaseUrl,
+      configPath,
+      streams: configured.flatMap((camera) => [
+        {
+          cameraId: camera.id,
+          role: 'main',
+          streamName: camera.streams.main
+        },
+        {
+          cameraId: camera.id,
+          role: 'sub',
+          streamName: camera.streams.sub
+        }
+      ])
+    }
+  });
+}
 console.log(configPath);
+
+async function readTextFile(filePath) {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
 
 async function readJsonlDir(dir, prefix) {
   let entries;
