@@ -7,6 +7,7 @@ import {
   type CameraControlFailedPayload,
   type CameraControlRequestedPayload,
   type CameraCredentialsSavedPayload,
+  type CameraAddressRediscoveredPayload,
   type DiscoveryCompletedPayload,
   type DiscoveryInitiatedPayload,
   type Go2rtcObservationRequestedPayload,
@@ -48,6 +49,18 @@ export async function appendCameraCredentialsSaved(payload: CameraCredentialsSav
   return await appendEvent<CameraCredentialsSavedPayload>(CAMERA_STREAM, {
     type: 'camera.credentials.saved',
     source: 'patrol-web',
+    payload
+  });
+}
+
+export async function appendCameraAddressRediscovered(
+  payload: CameraAddressRediscoveredPayload,
+  correlationId?: string
+) {
+  return await appendEvent<CameraAddressRediscoveredPayload>(CAMERA_STREAM, {
+    type: 'camera.address.rediscovered',
+    source: 'patrol-discovery',
+    correlation_id: correlationId,
     payload
   });
 }
