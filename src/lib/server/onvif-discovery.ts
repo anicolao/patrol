@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import dgram from 'node:dgram';
+import { networkInterfaces } from 'node:os';
 import type { CameraDiscoveryRawResult, RawProbeResponse } from '$lib/cameras/discovery';
 
 const MULTICAST_ADDRESS = '239.255.255.250';
@@ -7,6 +8,12 @@ const MULTICAST_PORT = 3702;
 
 interface ProbeOptions {
   timeoutMs?: number;
+  localAddresses?: string[];
+}
+
+interface ProbeResult {
+  responses: RawProbeResponse[];
+  errors: string[];
 }
 
 export async function discoverOnvifCameras(
@@ -18,7 +25,9 @@ export async function discoverOnvifCameras(
 
   let responses: RawProbeResponse[] = [];
   try {
-    responses = await probe(timeoutMs);
+    const result = await probe(timeoutMs, options.localAddresses ?? discoveryLocalAddresses());
+    responses = result.responses;
+    errors.push(...result.errors);
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error));
   }
@@ -32,17 +41,38 @@ export async function discoverOnvifCameras(
   };
 }
 
-async function probe(timeoutMs: number): Promise<RawProbeResponse[]> {
+async function probe(timeoutMs: number, localAddresses: string[]): Promise<ProbeResult> {
+  const results = await Promise.all(
+    localAddresses.map(async (localAddress) => {
+      try {
+        return await probeLocalAddress(timeoutMs, localAddress);
+      } catch (error) {
+        return {
+          responses: [],
+          errors: [`${localAddress}: ${error instanceof Error ? error.message : String(error)}`]
+        };
+      }
+    })
+  );
+
+  return {
+    responses: results.flatMap((result) => result.responses),
+    errors: results.flatMap((result) => result.errors)
+  };
+}
+
+async function probeLocalAddress(timeoutMs: number, localAddress: string): Promise<ProbeResult> {
   const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
   const messageId = `uuid:${randomUUID()}`;
   const probeMessage = Buffer.from(createProbeMessage(messageId));
   const responses: RawProbeResponse[] = [];
+  const errors: string[] = [];
 
-  return await new Promise((resolve, reject) => {
+  return await new Promise<ProbeResult>((resolve, reject) => {
     const finish = () => {
       clearTimeout(timer);
       socket.removeAllListeners();
-      socket.close(() => resolve(responses));
+      socket.close(() => resolve({ responses, errors }));
     };
 
     const timer = setTimeout(finish, timeoutMs);
@@ -63,15 +93,35 @@ async function probe(timeoutMs: number): Promise<RawProbeResponse[]> {
 
     socket.bind(0, () => {
       socket.setMulticastTTL(4);
+      socket.setMulticastInterface(localAddress);
       socket.send(probeMessage, MULTICAST_PORT, MULTICAST_ADDRESS, (error) => {
         if (error) {
-          clearTimeout(timer);
-          socket.removeAllListeners();
-          socket.close(() => reject(error));
+          errors.push(`${localAddress}: ${error.message}`);
         }
       });
     });
   });
+}
+
+function discoveryLocalAddresses() {
+  const configured = splitAddresses(process.env.PATROL_ONVIF_DISCOVERY_ADDRESSES ?? '');
+  if (configured.length > 0) {
+    return configured;
+  }
+
+  const addresses = Object.values(networkInterfaces())
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === 'IPv4' && !entry.internal)
+    .map((entry) => entry.address);
+
+  return Array.from(new Set(addresses)).sort();
+}
+
+function splitAddresses(value: string) {
+  return value
+    .split(/[,\s]+/)
+    .map((address) => address.trim())
+    .filter(Boolean);
 }
 
 function createProbeMessage(messageId: string) {
