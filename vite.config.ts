@@ -3,6 +3,13 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 const patrolGitRevision = resolvePatrolGitRevision();
+const allowedHosts = [
+  'emryss-mac-mini',
+  'emriss-mac-mini.amberwood',
+  'Emriss-mac-mini.amberwood',
+  'Emriss-Mac-mini.amberwood',
+  '10.20.240.94'
+];
 
 export default defineConfig({
   define: {
@@ -10,12 +17,10 @@ export default defineConfig({
   },
   plugins: [sveltekit()],
   server: {
-    allowedHosts: [
-      'emriss-mac-mini.amberwood',
-      'Emriss-mac-mini.amberwood',
-      'Emriss-Mac-mini.amberwood',
-      '10.20.240.94'
-    ]
+    allowedHosts
+  },
+  preview: {
+    allowedHosts
   }
 });
 
