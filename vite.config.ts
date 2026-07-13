@@ -5,6 +5,7 @@ import { defineConfig } from 'vite';
 const patrolGitRevision = resolvePatrolGitRevision();
 const allowedHosts = [
   'emryss-mac-mini',
+  'emryss-mac-mini.tail9754ad.ts.net',
   'emriss-mac-mini.amberwood',
   'Emriss-mac-mini.amberwood',
   'Emriss-Mac-mini.amberwood',
