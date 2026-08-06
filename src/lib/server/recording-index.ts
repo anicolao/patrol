@@ -1,16 +1,10 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import type { DiscoveredCamera, RecordingSegment, ReviewableSecurityEvent } from '$lib/cameras/discovery';
 import type { PatrolEvent } from '$lib/events';
-import { patrolDataRoot, patrolRecordingsDir } from './paths';
-
-const DEFAULT_SEGMENT_MS = 15_000;
-
-interface CameraStream {
-  camera: DiscoveredCamera;
-  role: 'main' | 'sub';
-  streamName: string;
-}
+import { openRecordingCatalog } from './recording-catalog';
+import { patrolDataRoot } from './paths';
 
 interface AnnkeAlertPayload {
   cameraId: string;
@@ -23,56 +17,16 @@ export async function readRecordingSegmentsForWindow(
   startMs: number,
   endMs: number
 ) {
-  const streams = cameraStreams(cameras);
-  const recordingsDir = patrolRecordingsDir();
-  const segments: RecordingSegment[] = [];
-  let availableStartMs: number | null = null;
-  let availableEndMs: number | null = null;
-
-  await Promise.all(
-    streams.map(async (stream) => {
-      const streamDir = path.join(recordingsDir, stream.streamName);
-      let entries: string[];
-      try {
-        entries = await readdir(streamDir);
-      } catch {
-        return;
-      }
-
-      for (const entry of entries) {
-        const segmentStartMs = segmentStartMsFromFileName(entry);
-        if (segmentStartMs === null) {
-          continue;
-        }
-
-        const segmentEndMs = segmentStartMs + DEFAULT_SEGMENT_MS;
-        availableStartMs = availableStartMs === null ? segmentStartMs : Math.min(availableStartMs, segmentStartMs);
-        availableEndMs = availableEndMs === null ? segmentEndMs : Math.max(availableEndMs, segmentEndMs);
-
-        if (!overlaps(segmentStartMs, segmentEndMs, startMs, endMs)) {
-          continue;
-        }
-
-        segments.push({
-          cameraId: stream.camera.id,
-          role: stream.role,
-          streamName: stream.streamName,
-          startMs: segmentStartMs,
-          endMs: segmentEndMs,
-          durationMs: DEFAULT_SEGMENT_MS,
-          sizeBytes: 0,
-          relativePath: path.join(stream.streamName, entry),
-          observedAtMs: segmentEndMs
-        });
-      }
-    })
-  );
-
-  return {
-    segments: segments.sort((left, right) => right.startMs - left.startMs || left.relativePath.localeCompare(right.relativePath)),
-    availableStartMs,
-    availableEndMs
-  };
+  const streamNames = cameras.flatMap((camera) => [camera.streams.main, camera.streams.sub]);
+  const catalog = await openRecordingCatalog(patrolDataRoot());
+  try {
+    return {
+      segments: catalog.segmentsForWindow(streamNames, startMs, endMs),
+      ...catalog.availableBounds(streamNames)
+    };
+  } finally {
+    catalog.close();
+  }
 }
 
 export async function readReviewableEventsForWindow(
@@ -123,34 +77,6 @@ export async function readReviewableEventsForWindow(
   return events.sort((left, right) => right.occurredAtMs - left.occurredAtMs || left.id.localeCompare(right.id));
 }
 
-function cameraStreams(cameras: DiscoveredCamera[]): CameraStream[] {
-  return cameras.flatMap((camera) => [
-    {
-      camera,
-      role: 'main' as const,
-      streamName: camera.streams.main
-    },
-    {
-      camera,
-      role: 'sub' as const,
-      streamName: camera.streams.sub
-    }
-  ]);
-}
-
-function segmentStartMsFromFileName(fileName: string) {
-  if (!fileName.endsWith('.mp4')) {
-    return null;
-  }
-
-  const seconds = Number(fileName.slice(0, -'.mp4'.length));
-  if (!Number.isInteger(seconds) || seconds <= 0) {
-    return null;
-  }
-
-  return seconds * 1000;
-}
-
 async function readCameraEventsForWindow(startMs: number, endMs: number) {
   const eventDir = path.join(patrolDataRoot(), 'events');
   const eventFiles = eventFileNamesForWindow('cameras', startMs, endMs);
@@ -158,26 +84,25 @@ async function readCameraEventsForWindow(startMs: number, endMs: number) {
 
   await Promise.all(
     eventFiles.map(async (eventFile) => {
-      let content: string;
+      const input = createReadStream(path.join(eventDir, eventFile), { encoding: 'utf8' });
+      const lines = createInterface({ input, crlfDelay: Infinity });
       try {
-        content = await readFile(path.join(eventDir, eventFile), 'utf8');
-      } catch {
-        return;
-      }
-
-      for (const line of content.split('\n')) {
-        if (!line.trim()) {
-          continue;
-        }
-
-        try {
-          const event = JSON.parse(line) as PatrolEvent;
-          if (event.ts_ms >= startMs - 24 * 60 * 60 * 1000 && event.ts_ms <= endMs + 24 * 60 * 60 * 1000) {
-            events.push(event);
+        for await (const line of lines) {
+          if (!line.trim()) {
+            continue;
           }
-        } catch {
-          continue;
+
+          try {
+            const event = JSON.parse(line) as PatrolEvent;
+            if (event.ts_ms >= startMs - 24 * 60 * 60 * 1000 && event.ts_ms <= endMs + 24 * 60 * 60 * 1000) {
+              events.push(event);
+            }
+          } catch {
+            continue;
+          }
         }
+      } catch {
+        // Missing daily event files simply contribute no events to the window.
       }
     })
   );
@@ -188,8 +113,8 @@ async function readCameraEventsForWindow(startMs: number, endMs: number) {
 function eventFileNamesForWindow(stream: string, startMs: number, endMs: number) {
   const names = new Set<string>();
   const dayMs = 24 * 60 * 60 * 1000;
-  const firstDayMs = Math.floor(startMs / dayMs) * dayMs;
-  const lastDayMs = Math.floor(endMs / dayMs) * dayMs;
+  const firstDayMs = Math.floor((startMs - dayMs) / dayMs) * dayMs;
+  const lastDayMs = Math.floor((endMs + dayMs) / dayMs) * dayMs;
 
   for (let dayMsValue = firstDayMs; dayMsValue <= lastDayMs; dayMsValue += dayMs) {
     names.add(`${stream}-${new Date(dayMsValue).toISOString().slice(0, 10)}.jsonl`);
@@ -224,8 +149,4 @@ function recordingEventLabel(targetType: string | null, eventType: string | null
     return 'Motion';
   }
   return eventType ?? targetType ?? 'Camera event';
-}
-
-function overlaps(leftStartMs: number, leftEndMs: number, rightStartMs: number, rightEndMs: number) {
-  return leftStartMs <= rightEndMs && leftEndMs >= rightStartMs;
 }
