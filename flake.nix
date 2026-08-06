@@ -76,7 +76,7 @@
                 . ./.env.local
                 set +a
               fi
-              npm run preview -- --host 0.0.0.0 --port 5184 --strictPort
+              exec ./node_modules/.bin/vite preview --host 0.0.0.0 --port 5184 --strictPort
             '';
           };
           patrol-recorder = pkgs.writeShellApplication {
