@@ -71,7 +71,12 @@ PATROL_RECORDING_SEGMENT_SECONDS=15
 PATROL_RECORDING_MIN_SEGMENT_BYTES=262144
 PATROL_MAIN_RECORDING_RETENTION_DAYS=7
 PATROL_SUB_RECORDING_RETENTION_DAYS=30
+PATROL_RECORDING_RETENTION_ENABLED=true
 ```
+
+Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
+without deleting expired recordings. This is useful while validating a new
+deployment or before an operator has approved retention cleanup.
 
 On the Mac mini deployment, use a data root for event logs and secrets and a
 separate recordings root on the NVR volume:
@@ -80,3 +85,25 @@ separate recordings root on the NVR volume:
 PATROL_DATA_DIR=/Volumes/NVR/patrol
 PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings
 ```
+
+## Install A macOS User LaunchAgent
+
+For a Mac that automatically logs in a desktop user, install the recorder in
+that user's GUI launchd domain. The initial Patrol deployment disables
+retention deletion so bringing the recorder online cannot remove existing
+clips:
+
+```sh
+PATROL_RECORDER_REPO_ROOT=/Users/security/projects/patrol \
+PATROL_DATA_DIR=/Volumes/NVR/patrol \
+PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
+PATROL_RECORDING_RETENTION_ENABLED=false \
+PATROL_RECORDER_RUN_AS_USER=security \
+nix develop --command patrol-recorder-launch-agent-install
+```
+
+Run the installer from the auto-login user's checkout. When
+`PATROL_RECORDER_RUN_AS_USER` names a different account, the LaunchAgent uses
+non-interactive SSH to that account on `localhost`. The agent stays loaded and
+restarts the recorder whenever its SSH-backed recorder process exits. Output is
+written to `~/Library/Logs/Patrol/recorder.log` for the auto-login user.
