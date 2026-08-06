@@ -39,6 +39,7 @@ const expiredPaths = new Set(
     .map((event) => event.payload.relativePath)
 );
 let stopping = false;
+let shuttingDown = false;
 
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-recorder',
@@ -61,11 +62,12 @@ const scanInterval = setInterval(() => {
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    stopping = true;
-    for (const child of children) {
-      child.stop(signal);
+    if (shuttingDown) {
+      return;
     }
-    shutdown(128 + signalNumber(signal), signal);
+    shuttingDown = true;
+    stopping = true;
+    void shutdown(128 + signalNumber(signal), signal);
   });
 }
 
@@ -111,6 +113,10 @@ function startRecorder(camera, role, streamName) {
   ];
   let child = null;
   let restartTimer = null;
+  let resolveStopped;
+  const stopped = new Promise((resolve) => {
+    resolveStopped = resolve;
+  });
 
   const launch = () => {
     if (stopping) {
@@ -125,6 +131,7 @@ function startRecorder(camera, role, streamName) {
     child.on('exit', (exitCode, signal) => {
       child = null;
       if (stopping) {
+        resolveStopped();
         return;
       }
 
@@ -141,8 +148,22 @@ function startRecorder(camera, role, streamName) {
     stop(signal) {
       if (restartTimer) {
         clearTimeout(restartTimer);
+        restartTimer = null;
       }
-      child?.kill(signal);
+      if (!child) {
+        resolveStopped();
+        return stopped;
+      }
+
+      const childToStop = child;
+      const forceStop = setTimeout(() => {
+        if (child === childToStop) {
+          childToStop.kill('SIGKILL');
+        }
+      }, 10_000);
+      childToStop.once('exit', () => clearTimeout(forceStop));
+      childToStop.kill(signal);
+      return stopped;
     }
   };
 }
@@ -384,19 +405,22 @@ function decodeXml(value) {
     .replaceAll('&amp;', '&');
 }
 
-function shutdown(exitCode, signal) {
+async function shutdown(exitCode, signal) {
   clearInterval(heartbeat);
   clearInterval(scanInterval);
-  void appendProcessExited({
-    processId: 'patrol-recorder',
-    label: 'Recording worker',
-    kind: 'worker',
-    exitCode,
-    signal,
-    detail: 'Recording worker stopped'
-  }).finally(() => {
+  await Promise.all(children.map((child) => child.stop(signal)));
+  try {
+    await appendProcessExited({
+      processId: 'patrol-recorder',
+      label: 'Recording worker',
+      kind: 'worker',
+      exitCode,
+      signal,
+      detail: 'Recording worker stopped'
+    });
+  } finally {
     process.exit(exitCode);
-  });
+  }
 }
 
 function signalNumber(signal) {
