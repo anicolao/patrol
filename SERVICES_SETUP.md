@@ -34,3 +34,9 @@ nix develop --command patrol-service-launch-agents-install
 
 Valid service identifiers are `events-ws`, `annke-events`,
 `state-checkpoint`, and `person-recognizer`.
+
+The event WebSocket keeps a bounded recent catch-up index instead of loading
+the complete event history into memory. It retains at most 10,000 events and
+seeds that index from up to 8 MiB of each active event stream on startup. The
+limits can be changed with `PATROL_EVENTS_WS_MAX_CATCH_UP_EVENTS` and
+`PATROL_EVENTS_WS_INITIAL_INDEX_BYTES`.
