@@ -4,6 +4,7 @@ The macOS deployment runs these persistent Patrol processes as independent
 user LaunchAgents:
 
 - `patrol-web`
+- `patrol-go2rtc`
 - `patrol-events-ws`
 - `patrol-annke-events`
 - `patrol-state-checkpoint`
@@ -34,7 +35,7 @@ PATROL_LAUNCH_AGENT_SERVICES=events-ws,state-checkpoint \
 nix develop --command patrol-service-launch-agents-install
 ```
 
-Valid service identifiers are `events-ws`, `annke-events`,
+Valid service identifiers are `events-ws`, `annke-events`, `go2rtc`,
 `state-checkpoint`, `person-recognizer`, `thumbnailer`, and `web`.
 
 The web LaunchAgent replaces the legacy `patrol-web-loop.sh` supervisor. It

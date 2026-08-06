@@ -14,6 +14,11 @@ const serviceDefinitions = [
     command: 'patrol-web'
   },
   {
+    id: 'go2rtc',
+    label: 'com.patrol.go2rtc',
+    command: 'patrol-go2rtc-start'
+  },
+  {
     id: 'events-ws',
     label: 'com.patrol.events-ws',
     command: 'patrol-events-ws'
