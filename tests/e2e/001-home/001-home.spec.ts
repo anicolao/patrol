@@ -215,7 +215,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     });
   });
   await page.route('**/api/annke/observe', async (route) => {
-    discoveryState = discoveredCameraState({
+    const observedState = discoveredCameraState({
       credentials: {
         savedAtMs: fixedNowMs - 30000,
         usernameSecretId: 'camera.uuid:driveway-camera.username',
@@ -224,6 +224,10 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       go2rtc: observedGo2rtc(fixedNowMs - 5000),
       annke: observedAnnkeAi(fixedNowMs - 4000)
     });
+    discoveryState = {
+      ...observedState,
+      devices: [observedState.devices[0], ...historyCompanionCameras(observedState.devices[0])]
+    };
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify(discoveryState)
@@ -550,6 +554,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     ]
   });
 
+  await page.setViewportSize({ width: 1280, height: 900 });
   await page.getByTestId('tab-history').click();
   await tester.step('recording-history', {
     description: 'Observed events are linked to retained recordings',
@@ -563,10 +568,14 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'Storage estimate is shown',
+        spec: 'Storage estimate is tucked into a compact disclosure',
         check: async () => {
-          await expect(page.getByTestId('recording-storage')).toContainText('Estimated total');
-          await expect(page.getByTestId('recording-storage')).toContainText('Observed on disk');
+          const storage = page.getByTestId('recording-storage');
+          await expect(storage.getByText('Storage & retention')).toBeVisible();
+          await storage.getByText('Storage & retention').click();
+          await expect(storage).toContainText('Total estimate');
+          await expect(storage).toContainText('Observed');
+          await storage.getByText('Storage & retention').click();
         }
       },
       {
@@ -578,22 +587,32 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         }
       },
       {
-        spec: 'Recording player jumps to the event segment',
+        spec: 'Camera grid uses one main-stream thumbnail until playback is requested',
         check: async () => {
           await page.getByRole('button', { name: /Vehicle/ }).click();
           await expect(page.getByTestId('recording-player')).toBeVisible();
+          await expect(
+            page.getByRole('list', { name: 'Camera recordings at playhead' }).getByRole('listitem')
+          ).toHaveCount(7);
+          await expect(page.getByTestId('recording-player')).not.toContainText('Substream');
           await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
+          await expect(page.getByTestId('recording-video')).toHaveCount(0);
+          await page.getByRole('button', { name: 'Play driveway recording' }).click();
           await expect(page.getByTestId('recording-video')).toHaveAttribute(
             'src',
             /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
           );
+          await page.getByRole('button', { name: 'Show thumbnail' }).click();
+          await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
+          await expect(page.getByTestId('history-jump-now')).toBeVisible();
         }
       }
     ]
   });
 
+  await page.setViewportSize({ width: 393, height: 852 });
   await page.getByTestId('tab-cameras').click();
-  await page.getByTestId('camera-preview-link').click();
+  await page.getByTestId('camera-preview-link').first().click();
   await tester.step('live-view', {
     description: 'High-resolution live camera view is shown',
     networkStatus: 'skip',
@@ -633,13 +652,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       {
         spec: 'Camera discovery age advances after one minute',
         check: async () => {
-          await expect(page.getByText('Discovered 2 minutes ago')).toBeVisible();
+          await expect(page.getByText('Discovered 2 minutes ago').first()).toBeVisible();
         }
       },
       {
         spec: 'Credential saved age advances after one minute',
         check: async () => {
-          await expect(page.getByText('Credentials saved 1 minute ago.')).toBeVisible();
+          await expect(page.getByText('Credentials saved 1 minute ago.').first()).toBeVisible();
         }
       }
     ]
@@ -924,6 +943,27 @@ function recordingThumbnailSvg() {
     <circle cx="56" cy="57" r="9" fill="#f8fafc"/>
     <text x="12" y="20" fill="#f8fafc" font-family="Arial, sans-serif" font-size="12" font-weight="700">driveway</text>
   </svg>`;
+}
+
+function historyCompanionCameras(template: DiscoveredCamera): DiscoveredCamera[] {
+  return ['front-door', 'backyard', 'side-yard', 'garage', 'gate', 'porch'].map((name, index) => ({
+    ...template,
+    id: `uuid:${name}-camera`,
+    endpoint: `uuid:${name}-camera`,
+    remoteAddress: `10.20.240.${194 + index}`,
+    name,
+    streams: {
+      main: `${name}_main`,
+      sub: `${name}_sub`
+    },
+    credentials: {
+      savedAtMs: template.credentials?.savedAtMs ?? 0,
+      usernameSecretId: `camera.uuid:${name}-camera.username`,
+      passwordSecretId: `camera.uuid:${name}-camera.password`
+    },
+    go2rtc: null,
+    annke: null
+  }));
 }
 
 function configuredGo2rtc(configuredAtMs: number): DiscoveredCamera['go2rtc'] {

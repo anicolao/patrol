@@ -99,9 +99,9 @@
 
 **Verifications:**
 - [x] History tab is selected
-- [x] Storage estimate is shown
+- [x] Storage estimate is tucked into a compact disclosure
 - [x] Vehicle event is shown in history
-- [x] Recording player jumps to the event segment
+- [x] Camera grid uses one main-stream thumbnail until playback is requested
 
 ---
 
