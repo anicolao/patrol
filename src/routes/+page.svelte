@@ -9,7 +9,9 @@
     ReviewableSecurityEvent
   } from '$lib/cameras/discovery';
   import {
+    loadCachedHistorySelection,
     loadCachedCameraStateSnapshot,
+    persistCachedHistorySelection,
     scheduleCameraStateSnapshotPersist
   } from '$lib/client/camera-state-cache';
   import { compactCameraStateSnapshot } from '$lib/cameras/state-compaction';
@@ -62,7 +64,6 @@
     previewThumbnailUrl: string | null;
     playbackSource: string | null;
     previewQuality: string;
-    playbackQuality: string;
   };
   type HistoryRecordingWindow = {
     startMs: number;
@@ -97,7 +98,6 @@
   };
 
   const liveEventPort = '5186';
-  const cachedSnapshotReconcileAfterMs = 5 * 60 * 1000;
   const historyTimelinePixelsPerMinute = 24;
   const historyTimelineBucketMs = 2 * 60 * 1000;
   const historyTimelinePaddingPx = 168;
@@ -141,7 +141,10 @@
   let historyTimeline: HistoryTimeline = emptyHistoryTimeline();
   let historyTimelineElement: HTMLElement | null = null;
   let historyScrollFrame: number | null = null;
+  let historyProgrammaticScroll = false;
   let historyPlaybackCommitTimer: number | null = null;
+  let historySelectionReady = false;
+  let activeHistoryPlaybackCameraId: string | null = null;
   let personSamples: PersonRecognitionSample[] = [];
   let reviewablePersonSamples: PersonRecognitionSample[] = [];
   let highConfidencePersonGroups: PersonTriageGroup[] = [];
@@ -158,16 +161,15 @@
     (discoveryState?.processes ?? []).every((process) => process.health === 'ok');
   $: historyEvents = historyRecordingWindow?.events ?? discoveryState?.recordings.events ?? [];
   $: historySegments = historyRecordingWindow?.segments ?? discoveryState?.recordings.segments ?? [];
-  $: if (browser && activeTab === 'history' && discoveryState && !historyRecordingWindow && !historyWindowLoading) {
+  $: if (
+    browser &&
+    historySelectionReady &&
+    activeTab === 'history' &&
+    discoveryState &&
+    !historyRecordingWindow &&
+    !historyWindowLoading
+  ) {
     void loadHistoryRecordingWindow(selectedHistoryTimeMs);
-  }
-  $: if (selectedHistoryTimeMs === null) {
-    const defaultReviewEvent = historyEvents.find((event) => event.preferredSegment);
-    if (defaultReviewEvent) {
-      selectedReviewEventId = defaultReviewEvent.id;
-      selectedHistoryTimeMs = defaultReviewEvent.occurredAtMs;
-      playbackHistoryTimeMs = defaultReviewEvent.occurredAtMs;
-    }
   }
   $: selectedReviewEvent = selectedReviewEventId
     ? (historyEvents.find((event) => event.id === selectedReviewEventId) ?? null)
@@ -224,14 +226,21 @@
     let stopped = false;
 
     void (async () => {
+      const cachedHistoryTimeMs = loadCachedHistorySelection();
+      if (cachedHistoryTimeMs !== null) {
+        selectedHistoryTimeMs = cachedHistoryTimeMs;
+        playbackHistoryTimeMs = cachedHistoryTimeMs;
+      }
       const loadedCachedState = await loadCachedDiscoveryState();
       if (!loadedCachedState) {
         await loadDiscoveryState();
-      } else if (cachedSnapshotNeedsImmediateRefresh(cameraSnapshot)) {
-        await loadDiscoveryState(true);
       } else {
-        void loadDiscoveryState(true);
+        await loadDiscoveryState(true);
       }
+      if (selectedHistoryTimeMs === null && cameraSnapshot) {
+        ensureHistorySelection(cameraSnapshot.state);
+      }
+      historySelectionReady = true;
       if (!stopped) {
         stopEventSocket = connectEventSocket();
       }
@@ -324,6 +333,16 @@
           ? current.startMs - historyRecordingWindowMs / 2
           : current.endMs + historyRecordingWindowMs / 2;
     await loadHistoryRecordingWindow(centerMs);
+  }
+
+  async function jumpHistoryToNow() {
+    const timeMs = Date.now();
+    selectedReviewEventId = null;
+    selectedHistoryTimeMs = timeMs;
+    activeHistoryPlaybackCameraId = null;
+    commitHistoryPlayback(timeMs);
+    await loadHistoryRecordingWindow();
+    await centerHistoryTimelineTime(timeMs);
   }
 
   async function discoverCameras() {
@@ -617,10 +636,12 @@
     }
   }
 
-  function setCameraSnapshot(snapshot: CameraStateSnapshot) {
+  function setCameraSnapshot(snapshot: CameraStateSnapshot, options: { selectHistory?: boolean } = {}) {
     const compacted = compactCameraStateSnapshot(snapshot);
     cameraSnapshot = compacted;
-    ensureHistorySelection(compacted.state);
+    if (options.selectHistory !== false) {
+      ensureHistorySelection(compacted.state);
+    }
     persistCameraSnapshot(compacted);
   }
 
@@ -659,24 +680,11 @@
 
     const snapshot = await loadCachedCameraStateSnapshot();
     if (snapshot) {
-      setCameraSnapshot(snapshot);
+      setCameraSnapshot(snapshot, { selectHistory: false });
       return true;
     }
 
     return false;
-  }
-
-  function cachedSnapshotNeedsImmediateRefresh(snapshot: CameraStateSnapshot | null) {
-    if (!snapshot) {
-      return true;
-    }
-
-    const configuredCameraCount = snapshot.state.devices.filter((camera) => camera.credentials).length;
-    if (configuredCameraCount === 0) {
-      return true;
-    }
-
-    return Date.now() - snapshot.cachedAtMs > cachedSnapshotReconcileAfterMs;
   }
 
   function persistCameraSnapshot(snapshot: CameraStateSnapshot) {
@@ -875,6 +883,7 @@
   function selectReviewEvent(event: ReviewableSecurityEvent) {
     selectedReviewEventId = event.id;
     selectedHistoryTimeMs = event.occurredAtMs;
+    activeHistoryPlaybackCameraId = null;
     commitHistoryPlayback(event.occurredAtMs);
     void centerHistoryTimelineTime(event.occurredAtMs);
   }
@@ -882,8 +891,13 @@
   function selectTimelineTime(timeMs: number) {
     selectedReviewEventId = null;
     selectedHistoryTimeMs = timeMs;
+    activeHistoryPlaybackCameraId = null;
     commitHistoryPlayback(timeMs);
     void centerHistoryTimelineTime(timeMs);
+  }
+
+  function toggleHistoryPlayback(cameraId: string) {
+    activeHistoryPlaybackCameraId = activeHistoryPlaybackCameraId === cameraId ? null : cameraId;
   }
 
   function selectTimelineGroup(group: HistoryTimelineGroup) {
@@ -915,6 +929,7 @@
       historyPlaybackCommitTimer = null;
     }
     playbackHistoryTimeMs = timeMs;
+    persistCachedHistorySelection(timeMs);
   }
 
   async function centerHistoryTimelineTime(timeMs: number) {
@@ -924,14 +939,18 @@
     }
 
     const targetTop = historyTimelinePaddingPx + historyTimelineYForTime(timeMs) - historyTimelineElement.clientHeight / 2;
+    historyProgrammaticScroll = true;
     historyTimelineElement.scrollTo({
       top: Math.max(0, targetTop),
-      behavior: 'smooth'
+      behavior: 'auto'
+    });
+    window.requestAnimationFrame(() => {
+      historyProgrammaticScroll = false;
     });
   }
 
   function handleHistoryTimelineScroll() {
-    if (historyScrollFrame !== null || !browser) {
+    if (historyProgrammaticScroll || historyScrollFrame !== null || !browser) {
       return;
     }
 
@@ -1028,27 +1047,9 @@
   }
 
   function preferredHistoryAvailabilitySegments(segments: RecordingSegment[]): HistoryTimelineSegment[] {
-    const mainSegments = segments.filter((segment) => segment.role === 'main');
-    const mainSegmentsByCamera = new Map<string, RecordingSegment[]>();
-    for (const segment of mainSegments) {
-      mainSegmentsByCamera.set(segment.cameraId, [...(mainSegmentsByCamera.get(segment.cameraId) ?? []), segment]);
-    }
-    for (const cameraSegments of mainSegmentsByCamera.values()) {
-      cameraSegments.sort((left, right) => left.startMs - right.startMs);
-    }
-    const preferredSegments = [
-      ...mainSegments,
-      ...segments.filter((segment) => {
-        if (segment.role !== 'sub') {
-          return false;
-        }
-        const midpointMs = segment.startMs + segment.durationMs / 2;
-        return !cameraHasMainSegmentAt(mainSegmentsByCamera.get(segment.cameraId) ?? [], midpointMs);
-      })
-    ].sort(
+    const preferredSegments = segments.filter((segment) => segment.role === 'main').sort(
       (left, right) =>
         left.cameraId.localeCompare(right.cameraId) ||
-        left.role.localeCompare(right.role) ||
         left.startMs - right.startMs ||
         left.relativePath.localeCompare(right.relativePath)
     );
@@ -1077,23 +1078,6 @@
     }
 
     return merged.sort((left, right) => right.endMs - left.endMs || left.id.localeCompare(right.id));
-  }
-
-  function cameraHasMainSegmentAt(segments: RecordingSegment[], timeMs: number) {
-    let low = 0;
-    let high = segments.length - 1;
-    while (low <= high) {
-      const middle = Math.floor((low + high) / 2);
-      const segment = segments[middle];
-      if (timeMs < segment.startMs) {
-        high = middle - 1;
-      } else if (timeMs > segment.endMs) {
-        low = middle + 1;
-      } else {
-        return true;
-      }
-    }
-    return false;
   }
 
   function historyTimelineHeight(durationMs: number) {
@@ -1215,21 +1199,7 @@
     if (group.events.some((event) => event.preferredSegment?.role === 'main')) {
       return 'full quality';
     }
-    if (group.events.some((event) => event.preferredSegment?.role === 'sub')) {
-      return 'substream';
-    }
-    return 'no recording';
-  }
-
-  function historyGroupThumbnailUrl(group: HistoryTimelineGroup) {
-    for (const event of group.events) {
-      const thumbnailUrl = historyEventThumbnailUrl(event);
-      if (thumbnailUrl) {
-        return thumbnailUrl;
-      }
-    }
-
-    return null;
+    return 'no main recording';
   }
 
   function historyGroupThumbnails(group: HistoryTimelineGroup) {
@@ -1268,7 +1238,7 @@
     }
 
     const segment = event.preferredSegment;
-    if (!segment) {
+    if (!segment || segment.role !== 'main') {
       return null;
     }
 
@@ -1499,25 +1469,6 @@
     return isAnonymousPersonLabel(sample.suggestedLabel) ? '' : sample.suggestedLabel ?? '';
   }
 
-  function recordingSource(event: ReviewableSecurityEvent) {
-    const segment = event.preferredSegment;
-    if (!segment) {
-      return null;
-    }
-
-    const params = new URLSearchParams({ path: segment.relativePath });
-    const offsetSeconds = Math.max(0, Math.floor((event.occurredAtMs - segment.startMs) / 1000));
-    return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
-  }
-
-  function recordingQualityLabel(event: ReviewableSecurityEvent) {
-    if (!event.preferredSegment) {
-      return 'no recording';
-    }
-
-    return event.preferredSegment.role === 'main' ? 'full quality' : 'substream';
-  }
-
   function buildHistoryCameraPlaybacks(
     cameras: DiscoveredCamera[],
     segments: RecordingSegment[],
@@ -1533,17 +1484,20 @@
         playbackSegment,
         previewThumbnailUrl: previewSegment && previewTimeMs !== null ? recordingThumbnailUrl(previewSegment, previewTimeMs) : null,
         playbackSource: playbackSegment && playbackTimeMs !== null ? recordingSegmentSource(playbackSegment, playbackTimeMs) : null,
-        previewQuality: recordingQualityLabelForSegment(previewSegment),
-        playbackQuality: recordingQualityLabelForSegment(playbackSegment)
+        previewQuality: previewSegment ? 'Main' : 'Unavailable'
       };
     });
   }
 
   function recordingSegmentForCameraTime(segments: RecordingSegment[], cameraId: string, timeMs: number) {
     const candidates = segments.filter(
-      (segment) => segment.cameraId === cameraId && timeMs >= segment.startMs && timeMs <= segment.endMs
+      (segment) =>
+        segment.cameraId === cameraId &&
+        segment.role === 'main' &&
+        timeMs >= segment.startMs &&
+        timeMs <= segment.endMs
     );
-    return candidates.find((segment) => segment.role === 'main') ?? candidates.find((segment) => segment.role === 'sub') ?? null;
+    return candidates[0] ?? null;
   }
 
   function recordingSegmentSource(segment: RecordingSegment, timeMs: number) {
@@ -1560,20 +1514,11 @@
     return `/api/recordings/thumbnail?${params.toString()}`;
   }
 
-  function recordingQualityLabelForSegment(segment: RecordingSegment | null) {
-    if (!segment) {
-      return 'no recording';
-    }
-    return segment.role === 'main' ? 'full quality' : 'substream';
-  }
-
   function selectedHistoryQualitySummary() {
     const full = historyCameraPlaybacks.filter((playback) => playback.previewSegment?.role === 'main').length;
-    const sub = historyCameraPlaybacks.filter((playback) => playback.previewSegment?.role === 'sub').length;
-    const missing = historyCameraPlaybacks.length - full - sub;
+    const missing = historyCameraPlaybacks.length - full;
     return [
-      full > 0 ? `${full} full` : null,
-      sub > 0 ? `${sub} sub` : null,
+      full > 0 ? `${full} cameras` : null,
       missing > 0 ? `${missing} missing` : null
     ].filter(Boolean).join(' · ') || 'no cameras';
   }
@@ -2016,32 +1961,20 @@
     </section>
   {:else if activeTab === 'history'}
     <section class="view" aria-labelledby="history-title">
-      <div class="section-header">
-        <div>
-          <h2 id="history-title">Recorded Events</h2>
-          <p>Review camera-side vehicle, person, and motion events against retained recordings.</p>
-          <p class="event-path">Recordings keep main stream quality for 7 days and substream quality for 30 days.</p>
-        </div>
-      </div>
+      <h2 id="history-title" class="sr-only">Camera history</h2>
 
       {#if discoveryState?.recordings}
-        <div class="storage-summary" data-testid="recording-storage">
-          <div>
-            <span>Estimated total</span>
-            <strong>{formatBytes(discoveryState.recordings.storage.totalEstimatedBytes)}</strong>
-          </div>
-          <div>
-            <span>Full quality</span>
-            <strong>{formatBytes(discoveryState.recordings.storage.mainEstimatedBytes)}</strong>
-          </div>
-          <div>
-            <span>Substream</span>
-            <strong>{formatBytes(discoveryState.recordings.storage.subEstimatedBytes)}</strong>
-          </div>
-          <div>
-            <span>Observed on disk</span>
-            <strong>{formatBytes(discoveryState.recordings.storage.observedBytes)}</strong>
-          </div>
+        <div class="history-overview">
+          <p>Scroll through events; the camera grid follows the playhead.</p>
+          <details class="history-summary" data-testid="recording-storage">
+            <summary>Storage &amp; retention</summary>
+            <dl>
+              <div><dt>Observed</dt><dd>{formatBytes(discoveryState.recordings.storage.observedBytes)}</dd></div>
+              <div><dt>Main estimate</dt><dd>{formatBytes(discoveryState.recordings.storage.mainEstimatedBytes)}</dd></div>
+              <div><dt>Archive estimate</dt><dd>{formatBytes(discoveryState.recordings.storage.subEstimatedBytes)}</dd></div>
+              <div><dt>Total estimate</dt><dd>{formatBytes(discoveryState.recordings.storage.totalEstimatedBytes)}</dd></div>
+            </dl>
+          </details>
         </div>
 
         {#if historyEvents.length > 0 || historySegments.length > 0 || historyWindowLoading}
@@ -2070,36 +2003,48 @@
                 {#each historyCameraPlaybacks as playback}
                   <li class="history-camera-playback" data-quality={playback.previewSegment?.role ?? 'missing'}>
                     <div class="history-camera-playback-header">
-                      <div>
-                        <h4>{displayName(playback.camera)}</h4>
-                        <p>{playback.camera.remoteAddress}</p>
-                      </div>
+                      <h4>{displayName(playback.camera)}</h4>
                       <span>{playback.previewQuality}</span>
                     </div>
 
-                    {#if playback.previewThumbnailUrl}
-                      <img
-                        class="history-scrub-preview"
-                        src={playback.previewThumbnailUrl}
-                        alt={`Preview frame from ${displayName(playback.camera)} at ${selectedHistoryTimeMs ? formatDateTime(selectedHistoryTimeMs) : 'the selected time'}`}
-                      />
+                    {#if activeHistoryPlaybackCameraId === playback.camera.id && playback.playbackSource}
+                      <div class="history-active-playback">
+                        {#key playback.playbackSource}
+                          <!-- svelte-ignore a11y_media_has_caption -->
+                          <video
+                            src={playback.playbackSource}
+                            controls
+                            autoplay
+                            playsinline
+                            preload="metadata"
+                            data-testid="recording-video"
+                          ></video>
+                        {/key}
+                        <button
+                          type="button"
+                          class="history-thumbnail-return"
+                          onclick={() => toggleHistoryPlayback(playback.camera.id)}
+                        >
+                          Show thumbnail
+                        </button>
+                      </div>
+                    {:else if playback.previewThumbnailUrl}
+                      <button
+                        type="button"
+                        class="history-preview-button"
+                        disabled={!playback.playbackSource}
+                        aria-label={`Play ${displayName(playback.camera)} recording`}
+                        onclick={() => toggleHistoryPlayback(playback.camera.id)}
+                      >
+                        <img
+                          class="history-scrub-preview"
+                          src={playback.previewThumbnailUrl}
+                          alt={`Preview frame from ${displayName(playback.camera)} at ${selectedHistoryTimeMs ? formatDateTime(selectedHistoryTimeMs) : 'the selected time'}`}
+                        />
+                        <span>Play</span>
+                      </button>
                     {:else}
-                      <div class="history-scrub-preview missing">No frame at playhead</div>
-                    {/if}
-
-                    {#if playback.playbackSource}
-                      {#key playback.playbackSource}
-                        <!-- svelte-ignore a11y_media_has_caption -->
-                        <video
-                          src={playback.playbackSource}
-                          controls
-                          playsinline
-                          preload="metadata"
-                          data-testid="recording-video"
-                        ></video>
-                      {/key}
-                    {:else}
-                      <p class="notice compact">No retained recording at the committed playhead.</p>
+                      <div class="history-scrub-preview missing">No main-stream frame</div>
                     {/if}
                   </li>
                 {/each}
@@ -2111,13 +2056,21 @@
                 <div>
                   <h3>Timeline</h3>
                   <p>
-                    Scroll the timeline under the fixed playhead to scrub video.
+                    Scroll under the fixed playhead.
                     {#if historyRecordingWindow}
                       Loaded {formatTimelineRange(historyRecordingWindow.startMs, historyRecordingWindow.endMs)}.
                     {/if}
                   </p>
                 </div>
                 <div class="history-window-controls">
+                  <button
+                    type="button"
+                    disabled={historyWindowLoading}
+                    data-testid="history-jump-now"
+                    onclick={jumpHistoryToNow}
+                  >
+                    Jump to now
+                  </button>
                   <button
                     type="button"
                     class="secondary"
@@ -2886,35 +2839,64 @@
     min-width: 72px;
   }
 
-  .storage-summary {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    margin-bottom: 12px;
+  .history-overview {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    color: #66727f;
+    font-size: 0.82rem;
   }
 
-  .storage-summary div {
+  .history-overview > p {
+    margin-bottom: 0;
+  }
+
+  .history-summary {
+    position: relative;
+    flex: 0 0 auto;
+  }
+
+  .history-summary summary {
+    cursor: pointer;
+    color: #3d4752;
+    font-weight: 750;
+  }
+
+  .history-summary dl {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
     display: grid;
-    gap: 4px;
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    gap: 8px 16px;
+    width: min(360px, calc(100vw - 40px));
+    margin: 0;
     border: 1px solid #d9dde2;
     border-radius: 8px;
     background: #ffffff;
+    box-shadow: 0 12px 28px rgba(23, 26, 31, 0.16);
     padding: 12px;
   }
 
-  .storage-summary span,
-  .recording-player p {
-    color: #66727f;
+  .history-summary dl div {
+    display: grid;
+    gap: 2px;
   }
 
-  .storage-summary span {
-    font-size: 0.78rem;
-    font-weight: 700;
+  .history-summary dt {
+    color: #66727f;
+    font-size: 0.72rem;
+    font-weight: 750;
     text-transform: uppercase;
   }
 
-  .storage-summary strong {
-    font-size: 1rem;
+  .history-summary dd {
+    margin: 0;
+    color: #171a1f;
+    font-weight: 800;
   }
 
   .people-summary {
@@ -3207,9 +3189,9 @@
 
   .recording-player {
     display: grid;
-    gap: 12px;
-    margin-bottom: 12px;
-    padding: 14px;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 10px;
   }
 
   .recording-player-header {
@@ -3225,9 +3207,15 @@
     margin-bottom: 0;
   }
 
+  .recording-player p {
+    color: #66727f;
+    font-size: 0.8rem;
+  }
+
   .history-camera-playbacks {
     display: grid;
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 7px;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -3235,12 +3223,12 @@
 
   .history-camera-playback {
     display: grid;
-    gap: 8px;
+    gap: 5px;
     min-width: 0;
     border: 1px solid #d9dde2;
-    border-radius: 8px;
+    border-radius: 6px;
     background: #f9fafb;
-    padding: 10px;
+    padding: 6px;
   }
 
   .history-camera-playback[data-quality="main"] {
@@ -3248,41 +3236,67 @@
     background: #f7fcf9;
   }
 
-  .history-camera-playback[data-quality="sub"] {
-    border-color: #dfc979;
-    background: #fffdf5;
-  }
-
   .history-camera-playback-header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .history-camera-playback-header h4 {
+    overflow: hidden;
+    font-size: 0.8rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .history-camera-playback-header span {
     border: 1px solid #cbd1d8;
     border-radius: 999px;
     background: #ffffff;
-    padding: 3px 8px;
+    padding: 2px 6px;
     color: #3d4752;
-    font-size: 0.76rem;
+    font-size: 0.66rem;
     font-weight: 800;
     white-space: nowrap;
   }
 
+  .history-preview-button,
+  .history-active-playback,
   .history-scrub-preview,
-  .history-camera-playback video {
+  .history-active-playback video {
     width: 100%;
     aspect-ratio: 16 / 9;
     border-radius: 6px;
     background: #111827;
   }
 
+  .history-preview-button {
+    position: relative;
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+  }
+
+  .history-preview-button > span {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.82);
+    padding: 3px 7px;
+    color: #ffffff;
+    font-size: 0.68rem;
+    font-weight: 800;
+  }
+
   .history-scrub-preview {
     display: block;
-    border: 1px solid #d9dde2;
-    object-fit: contain;
+    border: 0;
+    object-fit: cover;
   }
 
   .history-scrub-preview.missing {
@@ -3293,9 +3307,29 @@
     font-weight: 800;
   }
 
+  .history-active-playback {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .history-active-playback video {
+    display: block;
+  }
+
+  .history-thumbnail-return {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    min-width: 0;
+    border-color: rgba(255, 255, 255, 0.7);
+    background: rgba(17, 24, 39, 0.82);
+    padding: 4px 7px;
+    font-size: 0.68rem;
+  }
+
   .history-workspace {
     display: grid;
-    gap: 12px;
+    gap: 10px;
   }
 
   .history-timeline-panel {
@@ -3335,6 +3369,11 @@
 
   .history-window-controls .secondary {
     min-width: 84px;
+    padding: 8px 10px;
+  }
+
+  .history-window-controls button:not(.secondary) {
+    min-width: 104px;
     padding: 8px 10px;
   }
 
@@ -3505,7 +3544,7 @@
 
   @media (orientation: landscape) and (min-width: 760px) {
     .history-workspace {
-      grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+      grid-template-columns: minmax(540px, 1.45fr) minmax(340px, 0.8fr);
       align-items: start;
     }
 

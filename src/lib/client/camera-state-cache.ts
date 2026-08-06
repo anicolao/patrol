@@ -7,6 +7,8 @@ const CAMERA_STATE_KEY = 'camera-state';
 const PROJECTION_VERSION = 2;
 const LOCAL_STORAGE_MARKER_KEY = 'patrol.client_state_cache.v1';
 const LEGACY_LOCAL_STORAGE_STATE_KEY = 'patrol.camera_state.v2';
+const HISTORY_SELECTION_STORAGE_KEY = 'patrol.history_selection.v1';
+const HISTORY_SELECTION_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 const WRITE_DEBOUNCE_MS = 250;
 
 interface CameraStateProjectionRecord {
@@ -15,6 +17,11 @@ interface CameraStateProjectionRecord {
   projectionVersion: number;
   snapshot: CameraStateSnapshot;
   updatedAtMs: number;
+}
+
+interface CachedHistorySelection {
+  timeMs: number;
+  writtenAtMs: number;
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -52,6 +59,49 @@ export function scheduleCameraStateSnapshotPersist(snapshot: CameraStateSnapshot
     writeTimer = null;
     void flushPendingCameraStateSnapshot();
   }, WRITE_DEBOUNCE_MS);
+}
+
+export function loadCachedHistorySelection(nowMs = Date.now()) {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(HISTORY_SELECTION_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const selection = JSON.parse(raw) as Partial<CachedHistorySelection>;
+    if (
+      typeof selection.timeMs !== 'number' ||
+      !Number.isFinite(selection.timeMs) ||
+      typeof selection.writtenAtMs !== 'number' ||
+      !Number.isFinite(selection.writtenAtMs) ||
+      selection.writtenAtMs > nowMs ||
+      nowMs - selection.writtenAtMs > HISTORY_SELECTION_MAX_AGE_MS
+    ) {
+      window.localStorage.removeItem(HISTORY_SELECTION_STORAGE_KEY);
+      return null;
+    }
+    return selection.timeMs;
+  } catch {
+    return null;
+  }
+}
+
+export function persistCachedHistorySelection(timeMs: number, writtenAtMs = Date.now()) {
+  if (typeof window === 'undefined' || !Number.isFinite(timeMs)) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      HISTORY_SELECTION_STORAGE_KEY,
+      JSON.stringify({ timeMs, writtenAtMs } satisfies CachedHistorySelection)
+    );
+  } catch {
+    // History still works when browser storage is unavailable.
+  }
 }
 
 export async function flushPendingCameraStateSnapshot() {
