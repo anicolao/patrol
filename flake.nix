@@ -113,6 +113,14 @@
               node scripts/install-watchdog-cron.mjs
             '';
           };
+          patrol-watchdog-launch-agent-install = pkgs.writeShellApplication {
+            name = "patrol-watchdog-launch-agent-install";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              node scripts/install-watchdog-launch-agent.mjs
+            '';
+          };
           patrol-branch-audit = pkgs.writeShellApplication {
             name = "patrol-branch-audit";
             runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
@@ -151,6 +159,7 @@
               patrol-state-checkpoint
               patrol-watchdog
               patrol-watchdog-cron-install
+              patrol-watchdog-launch-agent-install
             ];
           };
         });
