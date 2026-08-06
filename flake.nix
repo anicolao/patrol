@@ -65,6 +65,20 @@
               node scripts/event-websocket-server.mjs
             '';
           };
+          patrol-web = pkgs.writeShellApplication {
+            name = "patrol-web";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              if [ -r .env.local ]; then
+                set -a
+                # shellcheck source=/dev/null
+                . ./.env.local
+                set +a
+              fi
+              npm run preview -- --host 0.0.0.0 --port 5184 --strictPort
+            '';
+          };
           patrol-recorder = pkgs.writeShellApplication {
             name = "patrol-recorder";
             runtimeInputs = [
@@ -200,6 +214,7 @@
               patrol-watchdog
               patrol-watchdog-cron-install
               patrol-watchdog-launch-agent-install
+              patrol-web
             ];
           };
         });

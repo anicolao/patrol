@@ -3,6 +3,7 @@
 The macOS deployment runs these persistent Patrol processes as independent
 user LaunchAgents:
 
+- `patrol-web`
 - `patrol-events-ws`
 - `patrol-annke-events`
 - `patrol-state-checkpoint`
@@ -34,7 +35,11 @@ nix develop --command patrol-service-launch-agents-install
 ```
 
 Valid service identifiers are `events-ws`, `annke-events`,
-`state-checkpoint`, `person-recognizer`, and `thumbnailer`.
+`state-checkpoint`, `person-recognizer`, `thumbnailer`, and `web`.
+
+The web LaunchAgent replaces the legacy `patrol-web-loop.sh` supervisor. It
+loads `.env.local` from the deployment checkout before starting the built
+Vite preview server on port 5184.
 
 The thumbnailer stores derived JPEGs under
 `~/.cache/patrol/recording-thumbnails` for the account running the service.
