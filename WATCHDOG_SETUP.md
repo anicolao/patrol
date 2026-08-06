@@ -63,6 +63,31 @@ nix develop --command patrol-watchdog
 
 Logs are appended to `.patrol/logs/watchdog.log`.
 
+## Install A macOS User LaunchAgent
+
+For a Mac that automatically logs in a desktop user, install the watchdog in
+that user's GUI launchd domain:
+
+```sh
+PATROL_WATCHDOG_REPO_ROOT=/Users/security/projects/patrol \
+PATROL_DATA_DIR=/Volumes/NVR/patrol \
+PATROL_WATCHDOG_ENV_FILE=/Volumes/NVR/patrol/watchdog.env \
+PATROL_WATCHDOG_RUN_AS_USER=security \
+nix develop --command patrol-watchdog-launch-agent-install
+```
+
+Run the installer from a checkout accessible to the auto-login user. When
+`PATROL_WATCHDOG_RUN_AS_USER` names a different account, the LaunchAgent uses
+non-interactive SSH to that account on `localhost`; verify that key-based SSH
+and strict host-key checking work before installing. This keeps protected
+Patrol data access under the service account while launchd ownership remains
+with the auto-login account.
+
+The installer fails if the GUI launchd domain, environment file access, agent
+bootstrap, kickstart, or post-install verification fails. It does not fall back
+to a detached process that would disappear on reboot. LaunchAgent output is
+written to `~/Library/Logs/Patrol/watchdog.log` for the auto-login user.
+
 ## Manual Test
 
 Run a non-notifying check:

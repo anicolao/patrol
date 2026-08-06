@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   appendProcessHeartbeat,
@@ -115,7 +115,11 @@ async function checkPatrolHealth() {
       ]);
     }
 
-    const failures = processes
+    const recentProcessEvents = await readRecentProcessEvents();
+    const refreshedProcesses = processes.map((process) =>
+      refreshProcessHealth(process, recentProcessEvents.get(String(process.id ?? 'unknown')))
+    );
+    const failures = refreshedProcesses
       .filter((process) => process.health !== 'ok')
       .map((process) => ({
         id: String(process.id ?? 'unknown'),
@@ -127,8 +131,8 @@ async function checkPatrolHealth() {
 
     return {
       ok: failures.length === 0,
-      greenCount: processes.length - failures.length,
-      totalCount: processes.length,
+      greenCount: refreshedProcesses.length - failures.length,
+      totalCount: refreshedProcesses.length,
       failures
     };
   } catch (error) {
@@ -144,6 +148,79 @@ async function checkPatrolHealth() {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readRecentProcessEvents() {
+  const eventsDir = path.join(dataRoot, 'events');
+  let names = [];
+  try {
+    names = (await readdir(eventsDir))
+      .filter((name) => /^system-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+      .sort()
+      .slice(-2);
+  } catch {
+    return new Map();
+  }
+
+  const latestByProcessId = new Map();
+  for (const name of names) {
+    let content = '';
+    try {
+      content = await readFile(path.join(eventsDir, name), 'utf8');
+    } catch {
+      continue;
+    }
+
+    for (const line of content.split('\n')) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(line);
+        if (event.type !== 'system.process.heartbeat' && event.type !== 'system.process.exited') {
+          continue;
+        }
+        const processId = event.payload?.processId;
+        if (typeof processId !== 'string' || typeof event.ts_ms !== 'number') {
+          continue;
+        }
+        const previous = latestByProcessId.get(processId);
+        if (!previous || event.ts_ms > previous.tsMs) {
+          latestByProcessId.set(processId, {
+            tsMs: event.ts_ms,
+            eventType: event.type,
+            detail: typeof event.payload?.detail === 'string' ? event.payload.detail : null
+          });
+        }
+      } catch {
+        // Ignore an incomplete or malformed event line and continue checking health.
+      }
+    }
+  }
+  return latestByProcessId;
+}
+
+function refreshProcessHealth(process, recentEvent) {
+  const storedLastAliveAtMs = typeof process.lastAliveAtMs === 'number' ? process.lastAliveAtMs : null;
+  const useRecentEvent = recentEvent && (storedLastAliveAtMs === null || recentEvent.tsMs >= storedLastAliveAtMs);
+  const lastAliveAtMs = useRecentEvent ? recentEvent.tsMs : storedLastAliveAtMs;
+  const expectedEveryMs = Number(process.expectedEveryMs ?? 90_000);
+  const eventType = useRecentEvent ? recentEvent.eventType : process.lastEventType;
+  const health =
+    eventType === 'system.process.exited'
+      ? 'error'
+      : lastAliveAtMs === null
+        ? 'missing'
+        : Date.now() - lastAliveAtMs > expectedEveryMs
+          ? 'stale'
+          : 'ok';
+
+  return {
+    ...process,
+    lastAliveAtMs,
+    health,
+    detail: useRecentEvent && recentEvent.detail ? recentEvent.detail : process.detail
+  };
 }
 
 function failedCheck(failures) {
