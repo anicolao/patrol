@@ -71,6 +71,9 @@ if (once) {
 async function generateBatch() {
   const nowMs = Date.now();
   const candidates = catalog.segmentsNeedingThumbnails(nowMs - retentionMs, nowMs, batchSize);
+  let generated = 0;
+  let failed = 0;
+  let generatedBytes = 0;
   for (const candidate of candidates) {
     if (stopping) {
       break;
@@ -84,8 +87,10 @@ async function generateBatch() {
         result.sizeBytes,
         Date.now()
       );
-      console.log(JSON.stringify({ event: 'recording.thumbnail.generated', ...candidate, ...result }));
+      generated += 1;
+      generatedBytes += result.sizeBytes;
     } catch (error) {
+      failed += 1;
       const message = error instanceof Error ? error.message : String(error);
       catalog.markThumbnailFailed(candidate.relativePath, message, Date.now() + retryMs);
       console.error(JSON.stringify({
@@ -94,6 +99,17 @@ async function generateBatch() {
         error: message
       }));
     }
+  }
+  if (candidates.length > 0) {
+    console.log(JSON.stringify({
+      event: 'recording.thumbnail.batch_completed',
+      selected: candidates.length,
+      generated,
+      failed,
+      generatedBytes,
+      newestStartMs: candidates[0]?.startMs ?? null,
+      oldestStartMs: candidates.at(-1)?.startMs ?? null
+    }));
   }
   return candidates.length;
 }
