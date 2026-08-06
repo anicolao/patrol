@@ -1214,7 +1214,7 @@
         const camera = cameraById(event.cameraId);
         const label = `${camera?.name ?? camera?.remoteAddress ?? 'Unknown camera'} ${event.label}`;
         return {
-          key: `${event.cameraId}:${url}`,
+          key: event.cameraId,
           url,
           label
         };
@@ -1242,7 +1242,7 @@
       return null;
     }
 
-    return recordingThumbnailUrl(segment, event.occurredAtMs);
+    return recordingThumbnailUrl(segment);
   }
 
   async function labelPersonSample(sample: PersonRecognitionSample, event: SubmitEvent) {
@@ -1482,7 +1482,7 @@
         camera,
         previewSegment,
         playbackSegment,
-        previewThumbnailUrl: previewSegment && previewTimeMs !== null ? recordingThumbnailUrl(previewSegment, previewTimeMs) : null,
+        previewThumbnailUrl: previewSegment ? recordingThumbnailUrl(previewSegment) : null,
         playbackSource: playbackSegment && playbackTimeMs !== null ? recordingSegmentSource(playbackSegment, playbackTimeMs) : null,
         previewQuality: previewSegment ? 'Main' : 'Unavailable'
       };
@@ -1506,11 +1506,8 @@
     return `/api/recordings/file?${params.toString()}#t=${offsetSeconds}`;
   }
 
-  function recordingThumbnailUrl(segment: RecordingSegment, timeMs: number) {
-    const params = new URLSearchParams({
-      path: segment.relativePath,
-      t: String(Math.max(0, Math.floor((timeMs - segment.startMs) / 1000)))
-    });
+  function recordingThumbnailUrl(segment: RecordingSegment) {
+    const params = new URLSearchParams({ path: segment.relativePath });
     return `/api/recordings/thumbnail?${params.toString()}`;
   }
 

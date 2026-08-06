@@ -1,11 +1,6 @@
-import { execFile } from 'node:child_process';
-import path from 'node:path';
-import { promisify } from 'node:util';
 import { error } from '@sveltejs/kit';
-import { stat } from 'node:fs/promises';
-import { patrolRecordingsDir } from '$lib/server/paths';
-
-const execFileAsync = promisify(execFile);
+import { readFile } from 'node:fs/promises';
+import { patrolThumbnailDir, thumbnailAbsolutePath } from '$lib/server/recording-thumbnails';
 
 export async function GET({ url }) {
   const relativePath = url.searchParams.get('path');
@@ -13,60 +8,27 @@ export async function GET({ url }) {
     error(400, 'Missing recording path.');
   }
 
-  const offsetSeconds = Number(url.searchParams.get('t') ?? '0');
-  if (!Number.isFinite(offsetSeconds) || offsetSeconds < 0) {
-    error(400, 'Invalid thumbnail offset.');
-  }
-
-  const recordingsDir = patrolRecordingsDir();
-  const absolutePath = path.resolve(recordingsDir, relativePath);
-  const resolvedRoot = path.resolve(recordingsDir);
-  if (!absolutePath.startsWith(`${resolvedRoot}${path.sep}`)) {
-    error(400, 'Recording path escapes the recordings directory.');
-  }
-
+  let absolutePath: string;
   try {
-    await stat(absolutePath);
+    absolutePath = thumbnailAbsolutePath(patrolThumbnailDir(), relativePath);
   } catch {
-    error(404, 'Recording segment not found.');
+    error(400, 'Invalid recording path.');
   }
 
+  let thumbnail: Buffer;
   try {
-    const { stdout } = await execFileAsync(
-      'ffmpeg',
-      [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-ss',
-        String(Math.max(0, offsetSeconds)),
-        '-i',
-        absolutePath,
-        '-frames:v',
-        '1',
-        '-vf',
-        'scale=180:-1',
-        '-f',
-        'image2pipe',
-        '-vcodec',
-        'mjpeg',
-        'pipe:1'
-      ],
-      {
-        encoding: 'buffer',
-        maxBuffer: 1024 * 1024,
-        timeout: 5000
-      }
-    );
-
-    return new Response(stdout, {
-      headers: {
-        'content-type': 'image/jpeg',
-        'content-length': String(stdout.length),
-        'cache-control': 'private, max-age=3600'
-      }
-    });
+    thumbnail = await readFile(absolutePath);
   } catch {
-    error(404, 'Unable to extract recording thumbnail.');
+    error(404, 'Recording thumbnail not found.');
   }
+
+  const responseBody = new Uint8Array(thumbnail.byteLength);
+  responseBody.set(thumbnail);
+  return new Response(responseBody, {
+    headers: {
+      'content-type': 'image/jpeg',
+      'content-length': String(thumbnail.length),
+      'cache-control': 'private, max-age=31536000, immutable'
+    }
+  });
 }

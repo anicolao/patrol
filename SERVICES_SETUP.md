@@ -7,6 +7,7 @@ user LaunchAgents:
 - `patrol-annke-events`
 - `patrol-state-checkpoint`
 - `patrol-person-recognizer`
+- `patrol-thumbnailer`
 
 For a Mac that automatically logs in a desktop user, install the agents in
 that user's GUI launchd domain:
@@ -33,7 +34,13 @@ nix develop --command patrol-service-launch-agents-install
 ```
 
 Valid service identifiers are `events-ws`, `annke-events`,
-`state-checkpoint`, and `person-recognizer`.
+`state-checkpoint`, `person-recognizer`, and `thumbnailer`.
+
+The thumbnailer stores derived JPEGs under
+`~/.cache/patrol/recording-thumbnails` for the account running the service.
+Set `PATROL_THUMBNAIL_DIR` to give both the worker and web process another
+local cache path. See [RECORDING_THUMBNAILS.md](RECORDING_THUMBNAILS.md) for
+the pipeline and retention design.
 
 The event WebSocket keeps a bounded recent catch-up index instead of loading
 the complete event history into memory. It retains at most 10,000 events and

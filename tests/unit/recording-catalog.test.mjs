@@ -37,6 +37,17 @@ test('catalog queries windows, bounds, expiration, and incremental event sync', 
       available_start_ms: 100_000,
       available_end_ms: 125_000
     });
+    assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 200_000, 10), [
+      { relativePath: 'main/100.mp4', startMs: 100_000 }
+    ]);
+    catalog.markThumbnailFailed('main/100.mp4', 'not ready', 300_000);
+    assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 250_000, 10), []);
+    assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 300_000, 10), [
+      { relativePath: 'main/100.mp4', startMs: 100_000 }
+    ]);
+    catalog.markThumbnailGenerated('main/100.mp4', 'main/1970/01/01/00/100.jpg', 512, 310_000);
+    assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 400_000, 10), []);
+    assert.deepEqual(catalog.thumbnailSummary(), { tracked: 1, generated: 1, failed: 0 });
 
     await writeFile(
       eventFile,
@@ -50,6 +61,13 @@ test('catalog queries windows, bounds, expiration, and incremental event sync', 
       catalog.segmentsForWindow(['camera_main', 'camera_sub'], 0, 200_000).map(({ relativePath }) => relativePath),
       ['sub/110.mp4']
     );
+    assert.deepEqual(catalog.thumbnailRecordsPastRetention(0, 10), [
+      {
+        relativePath: 'main/100.mp4',
+        thumbnailRelativePath: 'main/1970/01/01/00/100.jpg'
+      }
+    ]);
+    catalog.deleteThumbnail('main/100.mp4');
     assert.deepEqual(await syncRecordingCatalogFromEvents(catalog, eventsDir), {
       filesRead: 0,
       eventsApplied: 0

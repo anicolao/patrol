@@ -93,6 +93,13 @@ const SYSTEM_PROCESS_TASKS: Array<
     kind: 'worker',
     expectedEveryMs: PROCESS_STALE_AFTER_MS,
     detail: 'Extracts person crops and classifies local recognition samples'
+  },
+  {
+    id: 'patrol-thumbnailer',
+    label: 'Recording thumbnail worker',
+    kind: 'worker',
+    expectedEveryMs: PROCESS_STALE_AFTER_MS,
+    detail: 'Precomputes local JPEG previews for main recording segments'
   }
 ];
 
