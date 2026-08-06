@@ -56,6 +56,16 @@ Completed segment facts append to:
 .patrol/events/cameras-YYYY-MM-DD.jsonl
 ```
 
+The recorder also maintains a SQLite segment catalog at
+`.patrol/cache/recording-catalog.sqlite`. New segments enter the catalog from
+filesystem notifications as they settle; History and retention query this
+catalog instead of enumerating recording directories. To initialize or repair
+the catalog from the append-only event log, run:
+
+```sh
+nix develop --command patrol-recording-catalog-sync
+```
+
 Retention is enforced by the recorder:
 
 - Main stream segments older than 7 days are deleted and logged as expired.

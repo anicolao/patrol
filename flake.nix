@@ -74,7 +74,15 @@
             ];
             text = ''
               ${patrolRevisionEnv}
-              node scripts/start-recorder.mjs
+              node --experimental-strip-types scripts/start-recorder.mjs
+            '';
+          };
+          patrol-recording-catalog-sync = pkgs.writeShellApplication {
+            name = "patrol-recording-catalog-sync";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              node --experimental-strip-types scripts/sync-recording-catalog.mjs
             '';
           };
           patrol-recorder-launch-agent-install = pkgs.writeShellApplication {
@@ -171,6 +179,7 @@
               patrol-go2rtc-start
               patrol-branch-audit
               patrol-person-recognizer
+              patrol-recording-catalog-sync
               patrol-recorder
               patrol-recorder-launch-agent-install
               patrol-service-launch-agents-install

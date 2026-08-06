@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, watch } from 'node:fs';
 import { access, mkdir, readdir, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -8,14 +8,18 @@ import {
   startProcessHeartbeats
 } from './lib/patrol-events.mjs';
 import { patrolDataRoot, patrolRecordingsDir } from './lib/patrol-paths.mjs';
+import {
+  openRecordingCatalog,
+  syncRecordingCatalogFromEvents
+} from '../src/lib/server/recording-catalog.ts';
 
 const dataRoot = patrolDataRoot();
 const eventsDir = path.join(dataRoot, 'events');
 const secretsDir = path.join(dataRoot, 'secrets');
+const cacheDir = path.join(dataRoot, 'cache');
 const recordingsDir = patrolRecordingsDir(dataRoot);
 const go2rtcRtspBaseUrl = process.env.PATROL_GO2RTC_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
 const segmentSeconds = Number(process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '15');
-const scanEveryMs = Number(process.env.PATROL_RECORDING_SCAN_MS ?? '10000');
 const restartDelayMs = Number(process.env.PATROL_RECORDING_RESTART_DELAY_MS ?? '5000');
 const mainRetentionMs = Number(process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS ?? '7') * 24 * 60 * 60 * 1000;
 const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ?? '30') * 24 * 60 * 60 * 1000;
@@ -24,22 +28,22 @@ const retentionEnabled = !['0', 'false', 'no', 'off'].includes(
 );
 const segmentSettleMs = Number(process.env.PATROL_RECORDING_SEGMENT_SETTLE_MS ?? '5000');
 const minimumSegmentBytes = Number(process.env.PATROL_RECORDING_MIN_SEGMENT_BYTES ?? String(256 * 1024));
+const retentionSweepMs = Number(process.env.PATROL_RECORDING_RETENTION_SWEEP_MS ?? String(60 * 60 * 1000));
 
 await mkdir(recordingsDir, { recursive: true, mode: 0o700 });
 
 const cameras = await configuredCameras();
-const observedPaths = new Set(
-  (await readJsonlDir(eventsDir, 'cameras-'))
-    .filter((event) => event.type === 'recording.segment.observed')
-    .map((event) => event.payload.relativePath)
+const streams = cameras.flatMap((camera) => [
+  { camera, role: 'main', streamName: camera.streams.main },
+  { camera, role: 'sub', streamName: camera.streams.sub }
+]);
+await Promise.all(
+  streams.map(({ streamName }) => mkdir(path.join(recordingsDir, streamName), { recursive: true, mode: 0o700 }))
 );
-const expiredPaths = new Set(
-  (await readJsonlDir(eventsDir, 'cameras-'))
-    .filter((event) => event.type === 'recording.segment.expired')
-    .map((event) => event.payload.relativePath)
-);
+const catalog = await openRecordingCatalog(dataRoot);
 let stopping = false;
 let shuttingDown = false;
+let retentionSweepInFlight = false;
 
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-recorder',
@@ -48,12 +52,13 @@ const heartbeat = startProcessHeartbeats({
   detail: `Recording ${cameras.length} configured camera${cameras.length === 1 ? '' : 's'}`
 });
 
-const children = cameras.flatMap((camera) => [
-  startRecorder(camera, 'main', camera.streams.main),
-  startRecorder(camera, 'sub', camera.streams.sub)
-]);
-
-let scanInterval = null;
+const observers = streams.map(startRecordingObserver);
+const children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
+const retentionInterval = retentionEnabled
+  ? setInterval(() => {
+      void sweepRetentionIfIdle();
+    }, retentionSweepMs)
+  : null;
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
@@ -66,13 +71,11 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-await scanRecordings(cameras);
-if (!stopping) {
-  scanInterval = setInterval(() => {
-    void scanRecordings(cameras).catch((error) => {
-      console.error('recording scan failed:', error);
-    });
-  }, scanEveryMs);
+const catalogSync = await syncRecordingCatalogFromEvents(catalog, eventsDir);
+console.error(`recording catalog synchronized ${catalogSync.eventsApplied} event(s) from ${catalogSync.filesRead} file(s)`);
+
+if (retentionEnabled) {
+  void sweepRetentionIfIdle();
 }
 
 if (children.length === 0) {
@@ -81,7 +84,6 @@ if (children.length === 0) {
 
 function startRecorder(camera, role, streamName) {
   const streamDir = path.join(recordingsDir, streamName);
-  void mkdir(streamDir, { recursive: true, mode: 0o700 });
   const streamUrl = `${go2rtcRtspBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(streamName)}`;
   const outputPattern = path.join(streamDir, '%s.mp4');
   const args = [
@@ -172,103 +174,171 @@ function startRecorder(camera, role, streamName) {
   };
 }
 
-async function scanRecordings(cameras) {
-  const nowMs = Date.now();
-  for (const camera of cameras) {
-    for (const role of ['main', 'sub']) {
-      const streamName = camera.streams[role];
-      const streamDir = path.join(recordingsDir, streamName);
-      let entries;
-      try {
-        entries = await readdir(streamDir);
-      } catch {
-        continue;
-      }
-
-      for (const entry of entries.filter((fileName) => fileName.endsWith('.mp4'))) {
-        const absolutePath = path.join(streamDir, entry);
-        const relativePath = path.join(streamName, entry);
-        const startMs = segmentStartMs(entry);
-        if (startMs === null) {
-          continue;
-        }
-
-        const stats = await stat(absolutePath);
-        const retentionMs = role === 'main' ? mainRetentionMs : subRetentionMs;
-        if (retentionEnabled && nowMs - startMs > retentionMs) {
-          await expireSegment({
-            camera,
-            role,
-            streamName,
-            startMs,
-            relativePath,
-            absolutePath,
-            retentionDays: Math.round(retentionMs / (24 * 60 * 60 * 1000))
-          });
-          continue;
-        }
-
-        if (stats.size < minimumSegmentBytes) {
-          continue;
-        }
-
-        if (
-          nowMs - stats.mtimeMs < segmentSettleMs ||
-          observedPaths.has(relativePath) ||
-          expiredPaths.has(relativePath)
-        ) {
-          continue;
-        }
-
-        await appendCameraEvent({
-          type: 'recording.segment.observed',
-          source: 'patrol-recorder',
-          payload: {
-            cameraId: camera.id,
-            role,
-            streamName,
-            startMs,
-            durationMs: segmentSeconds * 1000,
-            sizeBytes: stats.size,
-            relativePath
-          }
-        });
-        observedPaths.add(relativePath);
-      }
+function startRecordingObserver({ camera, role, streamName }) {
+  const streamDir = path.join(recordingsDir, streamName);
+  const pending = new Map();
+  const observedThisRun = new Set();
+  const watcher = watch(streamDir, (eventType, fileName) => {
+    if (stopping || !fileName) {
+      return;
     }
+    const entry = fileName.toString();
+    if (segmentStartMs(entry) === null) {
+      return;
+    }
+    scheduleObservation(entry, segmentSettleMs);
+  });
+  watcher.on('error', (error) => {
+    console.error(`recording observer failed for ${streamName}:`, error);
+  });
+
+  function scheduleObservation(entry, delayMs) {
+    const existing = pending.get(entry);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    pending.set(entry, setTimeout(() => {
+      pending.delete(entry);
+      void observe(entry).catch((error) => {
+        console.error(`recording observation failed for ${streamName}/${entry}:`, error);
+      });
+    }, Math.max(100, delayMs)));
   }
+
+  async function observe(entry) {
+    if (stopping) {
+      return;
+    }
+    const startMs = segmentStartMs(entry);
+    if (startMs === null) {
+      return;
+    }
+    const relativePath = path.join(streamName, entry);
+    if (observedThisRun.has(relativePath) || catalog.hasSegment(relativePath)) {
+      observedThisRun.add(relativePath);
+      return;
+    }
+
+    const absolutePath = path.join(streamDir, entry);
+    let stats;
+    try {
+      stats = await stat(absolutePath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
+      return;
+    }
+    const remainingSettleMs = segmentSettleMs - (Date.now() - stats.mtimeMs);
+    if (remainingSettleMs > 0) {
+      scheduleObservation(entry, remainingSettleMs);
+      return;
+    }
+    if (stats.size < minimumSegmentBytes) {
+      return;
+    }
+
+    const segment = {
+      cameraId: camera.id,
+      role,
+      streamName,
+      startMs,
+      durationMs: segmentSeconds * 1000,
+      sizeBytes: stats.size,
+      relativePath,
+      observedAtMs: Date.now()
+    };
+    await appendCameraEvent({
+      type: 'recording.segment.observed',
+      source: 'patrol-recorder',
+      payload: {
+        cameraId: segment.cameraId,
+        role: segment.role,
+        streamName: segment.streamName,
+        startMs: segment.startMs,
+        durationMs: segment.durationMs,
+        sizeBytes: segment.sizeBytes,
+        relativePath: segment.relativePath
+      }
+    });
+    catalog.upsertSegment(segment);
+    observedThisRun.add(relativePath);
+  }
+
+  return {
+    close() {
+      watcher.close();
+      for (const timer of pending.values()) {
+        clearTimeout(timer);
+      }
+      pending.clear();
+    }
+  };
 }
 
-async function expireSegment(input) {
-  if (expiredPaths.has(input.relativePath)) {
+async function sweepRetentionIfIdle() {
+  if (!retentionEnabled || retentionSweepInFlight || stopping) {
     return;
   }
-
+  retentionSweepInFlight = true;
   try {
-    await unlink(input.absolutePath);
+    const nowMs = Date.now();
+    const expired = catalog.segmentsPastRetention(nowMs - mainRetentionMs, nowMs - subRetentionMs);
+    for (const segment of expired) {
+      if (stopping) {
+        return;
+      }
+      const absolutePath = path.join(recordingsDir, segment.relativePath);
+      try {
+        await unlink(absolutePath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      catalog.expireSegment(segment.relativePath, nowMs);
+      await appendCameraEvent({
+        type: 'recording.segment.expired',
+        source: 'patrol-recorder',
+        payload: {
+          cameraId: segment.cameraId,
+          role: segment.role,
+          streamName: segment.streamName,
+          startMs: segment.startMs,
+          relativePath: segment.relativePath,
+          retentionDays: segment.role === 'main'
+            ? Math.round(mainRetentionMs / (24 * 60 * 60 * 1000))
+            : Math.round(subRetentionMs / (24 * 60 * 60 * 1000))
+        }
+      });
+    }
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      throw error;
-    }
+    console.error('recording retention sweep failed:', error);
+  } finally {
+    retentionSweepInFlight = false;
   }
-
-  await appendCameraEvent({
-    type: 'recording.segment.expired',
-    source: 'patrol-recorder',
-    payload: {
-      cameraId: input.camera.id,
-      role: input.role,
-      streamName: input.streamName,
-      startMs: input.startMs,
-      relativePath: input.relativePath,
-      retentionDays: input.retentionDays
-    }
-  });
-  expiredPaths.add(input.relativePath);
-  observedPaths.delete(input.relativePath);
 }
 
 async function configuredCameras() {
+  try {
+    const checkpoint = JSON.parse(await readFile(path.join(cacheDir, 'server-camera-state.json'), 'utf8'));
+    const devices = checkpoint?.state?.devices;
+    if (Array.isArray(devices)) {
+      return devices
+        .filter((camera) => camera?.id && camera?.credentials && camera?.streams?.main && camera?.streams?.sub)
+        .map((camera) => ({
+          id: camera.id,
+          remoteAddress: camera.remoteAddress ?? null,
+          streams: {
+            main: camera.streams.main,
+            sub: camera.streams.sub
+          }
+        }));
+    }
+  } catch {
+    // Fall back to event replay when no valid state checkpoint exists yet.
+  }
+
   const cameras = reduceCameras(await readJsonlDir(eventsDir, 'cameras-'));
   const secrets = latestSecretsByCamera(await readJsonlDir(secretsDir, 'secrets-'));
   return cameras.filter((camera) => secrets.has(camera.id));
@@ -411,7 +481,12 @@ function decodeXml(value) {
 
 async function shutdown(exitCode, signal) {
   clearInterval(heartbeat);
-  clearInterval(scanInterval);
+  if (retentionInterval) {
+    clearInterval(retentionInterval);
+  }
+  for (const observer of observers) {
+    observer.close();
+  }
   await Promise.all(children.map((child) => child.stop(signal)));
   try {
     await appendProcessExited({
@@ -423,6 +498,7 @@ async function shutdown(exitCode, signal) {
       detail: 'Recording worker stopped'
     });
   } finally {
+    catalog.close();
     process.exit(exitCode);
   }
 }
