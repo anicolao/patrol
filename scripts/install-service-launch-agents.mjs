@@ -9,6 +9,11 @@ if (process.platform !== 'darwin') {
 
 const serviceDefinitions = [
   {
+    id: 'web',
+    label: 'com.patrol.web',
+    command: 'patrol-web'
+  },
+  {
     id: 'events-ws',
     label: 'com.patrol.events-ws',
     command: 'patrol-events-ws'
