@@ -53,12 +53,7 @@ const children = cameras.flatMap((camera) => [
   startRecorder(camera, 'sub', camera.streams.sub)
 ]);
 
-await scanRecordings(cameras);
-const scanInterval = setInterval(() => {
-  void scanRecordings(cameras).catch((error) => {
-    console.error('recording scan failed:', error);
-  });
-}, scanEveryMs);
+let scanInterval = null;
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
@@ -69,6 +64,15 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     stopping = true;
     void shutdown(128 + signalNumber(signal), signal);
   });
+}
+
+await scanRecordings(cameras);
+if (!stopping) {
+  scanInterval = setInterval(() => {
+    void scanRecordings(cameras).catch((error) => {
+      console.error('recording scan failed:', error);
+    });
+  }, scanEveryMs);
 }
 
 if (children.length === 0) {
