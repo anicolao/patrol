@@ -85,6 +85,14 @@
               node scripts/install-recorder-launch-agent.mjs
             '';
           };
+          patrol-service-launch-agents-install = pkgs.writeShellApplication {
+            name = "patrol-service-launch-agents-install";
+            runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
+            text = ''
+              ${patrolRevisionEnv}
+              node scripts/install-service-launch-agents.mjs
+            '';
+          };
           patrol-person-recognizer = pkgs.writeShellApplication {
             name = "patrol-person-recognizer";
             runtimeInputs = [
@@ -165,6 +173,7 @@
               patrol-person-recognizer
               patrol-recorder
               patrol-recorder-launch-agent-install
+              patrol-service-launch-agents-install
               patrol-state-checkpoint
               patrol-watchdog
               patrol-watchdog-cron-install

@@ -16,6 +16,9 @@ The system health dashboard expects these tasks to stay green:
 - `patrol-events-ws`
 - `patrol-go2rtc`
 - `patrol-annke-events`
+- `patrol-recorder`
+- `patrol-state-checkpoint`
+- `patrol-person-recognizer`
 - `patrol-watchdog`
 
 ## Local Secrets

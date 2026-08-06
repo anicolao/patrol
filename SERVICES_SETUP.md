@@ -1,0 +1,36 @@
+# Patrol Background Services
+
+The macOS deployment runs these persistent Patrol processes as independent
+user LaunchAgents:
+
+- `patrol-events-ws`
+- `patrol-annke-events`
+- `patrol-state-checkpoint`
+- `patrol-person-recognizer`
+
+For a Mac that automatically logs in a desktop user, install the agents in
+that user's GUI launchd domain:
+
+```sh
+PATROL_SERVICES_REPO_ROOT=/Users/security/projects/patrol \
+PATROL_DATA_DIR=/Volumes/NVR/patrol \
+PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
+PATROL_SERVICES_RUN_AS_USER=security \
+nix develop --command patrol-service-launch-agents-install
+```
+
+Run the installer from a checkout accessible to the auto-login user. When
+`PATROL_SERVICES_RUN_AS_USER` names a different account, each LaunchAgent uses
+non-interactive SSH to that account on `localhost`. Each agent has `RunAtLoad`
+and `KeepAlive` enabled, restarts independently, and writes output under
+`~/Library/Logs/Patrol/` for the auto-login user.
+
+To install or reinstall only selected agents, pass a comma-separated subset:
+
+```sh
+PATROL_LAUNCH_AGENT_SERVICES=events-ws,state-checkpoint \
+nix develop --command patrol-service-launch-agents-install
+```
+
+Valid service identifiers are `events-ws`, `annke-events`,
+`state-checkpoint`, and `person-recognizer`.
