@@ -82,6 +82,10 @@ should be an event explaining what it saw, decided, or was asked to do.
 
 ## Operations
 
+Use `SERVICES_SETUP.md` to install the persistent event WebSocket, Annke alert,
+state checkpoint, and person recognition workers as independent macOS user
+LaunchAgents.
+
 Use `WATCHDOG_SETUP.md` to install the local cron watchdog. It checks the
 system health reducer every minute and sends Pushover notifications when any
 expected security service is not green.
