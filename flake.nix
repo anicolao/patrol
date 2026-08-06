@@ -85,6 +85,18 @@
               node --experimental-strip-types scripts/sync-recording-catalog.mjs
             '';
           };
+          patrol-thumbnailer = pkgs.writeShellApplication {
+            name = "patrol-thumbnailer";
+            runtimeInputs = [
+              pkgs.ffmpeg
+              pkgs.git
+              pkgs.nodejs_24
+            ];
+            text = ''
+              ${patrolRevisionEnv}
+              node --experimental-strip-types scripts/generate-recording-thumbnails.mjs
+            '';
+          };
           patrol-recorder-launch-agent-install = pkgs.writeShellApplication {
             name = "patrol-recorder-launch-agent-install";
             runtimeInputs = [ pkgs.git pkgs.nodejs_24 ];
@@ -184,6 +196,7 @@
               patrol-recorder-launch-agent-install
               patrol-service-launch-agents-install
               patrol-state-checkpoint
+              patrol-thumbnailer
               patrol-watchdog
               patrol-watchdog-cron-install
               patrol-watchdog-launch-agent-install

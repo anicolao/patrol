@@ -595,7 +595,12 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
             page.getByRole('list', { name: 'Camera recordings at playhead' }).getByRole('listitem')
           ).toHaveCount(7);
           await expect(page.getByTestId('recording-player')).not.toContainText('Substream');
-          await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
+          const drivewayPreview = page.getByAltText(/Preview frame from driveway/);
+          await expect(drivewayPreview).toBeVisible();
+          await expect(drivewayPreview).toHaveAttribute(
+            'src',
+            '/api/recordings/thumbnail?path=driveway_main%2F1781099196.mp4'
+          );
           await expect(page.getByTestId('recording-video')).toHaveCount(0);
           await page.getByRole('button', { name: 'Play driveway recording' }).click();
           await expect(page.getByTestId('recording-video')).toHaveAttribute(

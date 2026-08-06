@@ -43,6 +43,16 @@ interface CatalogRow {
   observed_at_ms: number;
 }
 
+export interface CatalogThumbnailCandidate {
+  relativePath: string;
+  startMs: number;
+}
+
+export interface CatalogThumbnailCleanup {
+  relativePath: string;
+  thumbnailRelativePath: string | null;
+}
+
 const CATALOG_FILE_NAME = 'recording-catalog.sqlite';
 
 export class RecordingCatalog {
@@ -171,6 +181,106 @@ export class RecordingCatalog {
     return rows.map(segmentFromRow);
   }
 
+  segmentsNeedingThumbnails(retainedAfterMs: number, nowMs: number, limit: number): CatalogThumbnailCandidate[] {
+    const rows = this.#database.prepare(`
+      SELECT segments.relative_path, segments.start_ms
+      FROM recording_segments AS segments INDEXED BY recording_segments_active_role_start
+      LEFT JOIN recording_thumbnails AS thumbnails
+        ON thumbnails.relative_path = segments.relative_path
+      WHERE segments.expired_at_ms IS NULL
+        AND segments.role = 'main'
+        AND segments.start_ms >= ?
+        AND thumbnails.thumbnail_relative_path IS NULL
+        AND COALESCE(thumbnails.retry_after_ms, 0) <= ?
+      ORDER BY segments.start_ms DESC, segments.relative_path ASC
+      LIMIT ?
+    `).all(retainedAfterMs, nowMs, limit) as unknown as Array<{
+      relative_path: string;
+      start_ms: number;
+    }>;
+    return rows.map((row) => ({ relativePath: row.relative_path, startMs: row.start_ms }));
+  }
+
+  markThumbnailGenerated(
+    relativePath: string,
+    thumbnailRelativePath: string,
+    sizeBytes: number,
+    generatedAtMs = Date.now()
+  ) {
+    this.#database.prepare(`
+      INSERT INTO recording_thumbnails (
+        relative_path, thumbnail_relative_path, generated_at_ms, size_bytes,
+        attempt_count, last_error, retry_after_ms
+      ) VALUES (?, ?, ?, ?, 1, NULL, NULL)
+      ON CONFLICT(relative_path) DO UPDATE SET
+        thumbnail_relative_path = excluded.thumbnail_relative_path,
+        generated_at_ms = excluded.generated_at_ms,
+        size_bytes = excluded.size_bytes,
+        attempt_count = recording_thumbnails.attempt_count + 1,
+        last_error = NULL,
+        retry_after_ms = NULL
+    `).run(relativePath, thumbnailRelativePath, generatedAtMs, sizeBytes);
+  }
+
+  markThumbnailFailed(relativePath: string, message: string, retryAfterMs: number) {
+    this.#database.prepare(`
+      INSERT INTO recording_thumbnails (
+        relative_path, thumbnail_relative_path, generated_at_ms, size_bytes,
+        attempt_count, last_error, retry_after_ms
+      ) VALUES (?, NULL, NULL, NULL, 1, ?, ?)
+      ON CONFLICT(relative_path) DO UPDATE SET
+        thumbnail_relative_path = NULL,
+        generated_at_ms = NULL,
+        size_bytes = NULL,
+        attempt_count = recording_thumbnails.attempt_count + 1,
+        last_error = excluded.last_error,
+        retry_after_ms = excluded.retry_after_ms
+    `).run(relativePath, message.slice(0, 1000), retryAfterMs);
+  }
+
+  thumbnailRecordsPastRetention(retainedAfterMs: number, limit: number): CatalogThumbnailCleanup[] {
+    const rows = this.#database.prepare(`
+      SELECT thumbnails.relative_path, thumbnails.thumbnail_relative_path
+      FROM recording_thumbnails AS thumbnails
+      JOIN recording_segments AS segments ON segments.relative_path = thumbnails.relative_path
+      WHERE segments.expired_at_ms IS NOT NULL OR segments.start_ms < ?
+      ORDER BY segments.start_ms ASC, thumbnails.relative_path ASC
+      LIMIT ?
+    `).all(retainedAfterMs, limit) as unknown as Array<{
+      relative_path: string;
+      thumbnail_relative_path: string | null;
+    }>;
+    return rows.map((row) => ({
+      relativePath: row.relative_path,
+      thumbnailRelativePath: row.thumbnail_relative_path
+    }));
+  }
+
+  deleteThumbnail(relativePath: string) {
+    this.#database.prepare('DELETE FROM recording_thumbnails WHERE relative_path = ?').run(relativePath);
+  }
+
+  resetGeneratedThumbnails() {
+    this.#database.prepare(`
+      UPDATE recording_thumbnails
+      SET thumbnail_relative_path = NULL,
+          generated_at_ms = NULL,
+          size_bytes = NULL,
+          retry_after_ms = NULL
+      WHERE thumbnail_relative_path IS NOT NULL
+    `).run();
+  }
+
+  thumbnailSummary() {
+    const row = this.#database.prepare(`
+      SELECT COUNT(*) AS tracked,
+             SUM(CASE WHEN thumbnail_relative_path IS NOT NULL THEN 1 ELSE 0 END) AS generated,
+             SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed
+      FROM recording_thumbnails
+    `).get() as { tracked: number; generated: number; failed: number };
+    return { ...row };
+  }
+
   applyEvents(events: PatrolEvent[]) {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
@@ -246,6 +356,17 @@ export async function openRecordingCatalog(dataRoot: string) {
       ON recording_segments (stream_name, start_ms, end_ms) WHERE expired_at_ms IS NULL;
     CREATE INDEX IF NOT EXISTS recording_segments_active_end_window
       ON recording_segments (end_ms, start_ms, stream_name) WHERE expired_at_ms IS NULL;
+    CREATE INDEX IF NOT EXISTS recording_segments_active_role_start
+      ON recording_segments (role, start_ms DESC, relative_path) WHERE expired_at_ms IS NULL;
+    CREATE TABLE IF NOT EXISTS recording_thumbnails (
+      relative_path TEXT PRIMARY KEY REFERENCES recording_segments(relative_path),
+      thumbnail_relative_path TEXT,
+      generated_at_ms INTEGER,
+      size_bytes INTEGER,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      retry_after_ms INTEGER
+    );
     CREATE TABLE IF NOT EXISTS recording_catalog_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL

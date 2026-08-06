@@ -27,6 +27,11 @@ const serviceDefinitions = [
     id: 'person-recognizer',
     label: 'com.patrol.person-recognizer',
     command: 'patrol-person-recognizer'
+  },
+  {
+    id: 'thumbnailer',
+    label: 'com.patrol.thumbnailer',
+    command: 'patrol-thumbnailer'
   }
 ];
 
@@ -35,6 +40,7 @@ const currentUser = userInfo().username;
 const runAsUser = process.env.PATROL_SERVICES_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
+const thumbnailDir = process.env.PATROL_THUMBNAIL_DIR ?? null;
 const nixPath = process.env.PATROL_NIX_BIN ?? findExecutable('nix');
 const domain = `gui/${process.getuid()}`;
 const launchAgentDir = path.join(homedir(), 'Library', 'LaunchAgents');
@@ -159,6 +165,7 @@ function renderLaunchAgent(service, logFile) {
     '/usr/bin/env',
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
+    ...(thumbnailDir ? [`PATROL_THUMBNAIL_DIR=${thumbnailDir}`] : []),
     nixPath,
     'develop',
     '--command',
