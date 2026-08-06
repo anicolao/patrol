@@ -19,6 +19,9 @@ const scanEveryMs = Number(process.env.PATROL_RECORDING_SCAN_MS ?? '10000');
 const restartDelayMs = Number(process.env.PATROL_RECORDING_RESTART_DELAY_MS ?? '5000');
 const mainRetentionMs = Number(process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS ?? '7') * 24 * 60 * 60 * 1000;
 const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ?? '30') * 24 * 60 * 60 * 1000;
+const retentionEnabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true').toLowerCase()
+);
 const segmentSettleMs = Number(process.env.PATROL_RECORDING_SEGMENT_SETTLE_MS ?? '5000');
 const minimumSegmentBytes = Number(process.env.PATROL_RECORDING_MIN_SEGMENT_BYTES ?? String(256 * 1024));
 
@@ -167,7 +170,7 @@ async function scanRecordings(cameras) {
 
         const stats = await stat(absolutePath);
         const retentionMs = role === 'main' ? mainRetentionMs : subRetentionMs;
-        if (nowMs - startMs > retentionMs) {
+        if (retentionEnabled && nowMs - startMs > retentionMs) {
           await expireSegment({
             camera,
             role,
