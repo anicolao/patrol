@@ -106,7 +106,7 @@ export class RecordingCatalog {
     const rows = this.#database.prepare(`
       SELECT camera_id, role, stream_name, start_ms, end_ms, duration_ms,
              size_bytes, relative_path, observed_at_ms
-      FROM recording_segments
+      FROM recording_segments INDEXED BY recording_segments_active_end_window
       WHERE expired_at_ms IS NULL
         AND stream_name IN (${placeholders})
         AND start_ms <= ?
@@ -121,14 +121,25 @@ export class RecordingCatalog {
       return { availableStartMs: null, availableEndMs: null };
     }
     const placeholders = streamNames.map(() => '?').join(', ');
-    const row = this.#database.prepare(`
-      SELECT MIN(start_ms) AS available_start_ms, MAX(end_ms) AS available_end_ms
-      FROM recording_segments
-      WHERE expired_at_ms IS NULL AND stream_name IN (${placeholders})
-    `).get(...streamNames) as { available_start_ms: number | null; available_end_ms: number | null };
+    const startRow = this.#database.prepare(`
+      SELECT start_ms AS available_start_ms
+      FROM recording_segments INDEXED BY recording_segments_active_window
+      WHERE expired_at_ms IS NULL
+        AND stream_name IN (${placeholders})
+      ORDER BY start_ms ASC
+      LIMIT 1
+    `).get(...streamNames) as { available_start_ms: number } | undefined;
+    const endRow = this.#database.prepare(`
+      SELECT end_ms AS available_end_ms
+      FROM recording_segments INDEXED BY recording_segments_active_end_window
+      WHERE expired_at_ms IS NULL
+        AND stream_name IN (${placeholders})
+      ORDER BY end_ms DESC
+      LIMIT 1
+    `).get(...streamNames) as { available_end_ms: number } | undefined;
     return {
-      availableStartMs: row.available_start_ms,
-      availableEndMs: row.available_end_ms
+      availableStartMs: startRow?.available_start_ms ?? null,
+      availableEndMs: endRow?.available_end_ms ?? null
     };
   }
 
@@ -233,6 +244,8 @@ export async function openRecordingCatalog(dataRoot: string) {
       ON recording_segments (start_ms, end_ms) WHERE expired_at_ms IS NULL;
     CREATE INDEX IF NOT EXISTS recording_segments_active_stream_window
       ON recording_segments (stream_name, start_ms, end_ms) WHERE expired_at_ms IS NULL;
+    CREATE INDEX IF NOT EXISTS recording_segments_active_end_window
+      ON recording_segments (end_ms, start_ms, stream_name) WHERE expired_at_ms IS NULL;
     CREATE TABLE IF NOT EXISTS recording_catalog_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
