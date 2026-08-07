@@ -135,3 +135,14 @@
 - [x] Annke AI observed age advances after one minute
 
 ---
+
+## Unknown person samples can be labeled from high-resolution crops
+
+![Unknown person samples can be labeled from high-resolution crops](./screenshots/012-person-recognition.png)
+
+**Verifications:**
+- [x] People tab is selected
+- [x] Person recognition summary is shown
+- [x] Recognized sample can be bulk accepted or corrected
+
+---

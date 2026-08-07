@@ -11,6 +11,7 @@ export interface StepOptions {
   description: string;
   verifications: Verification[];
   networkStatus?: 'synced' | 'offline' | 'error' | 'skip';
+  beforeScreenshot?: () => Promise<void>;
 }
 
 interface DocStep {
@@ -68,6 +69,7 @@ export class TestStepHelper {
       );
     }
 
+    await options.beforeScreenshot?.();
     await expect(this.page).toHaveScreenshot(filename.replace(/\.png$/, ''));
 
     this.steps.push({
