@@ -31,6 +31,11 @@ interface RecordingSegmentExpiredPayload {
   relativePath: string;
 }
 
+interface RecordingSegmentRelocatedPayload extends RecordingSegmentObservedPayload {
+  previousRelativePath: string;
+  previousSizeBytes: number;
+}
+
 interface CatalogRow {
   camera_id: string;
   role: RecordingStreamRole;
@@ -74,6 +79,17 @@ export class RecordingCatalog {
     );
   }
 
+  segmentForPath(relativePath: string): RecordingSegment | null {
+    const row = this.#database.prepare(`
+      SELECT camera_id, role, stream_name, start_ms, end_ms, duration_ms,
+             size_bytes, relative_path, observed_at_ms
+      FROM recording_segments
+      WHERE relative_path = ?
+      LIMIT 1
+    `).get(relativePath) as CatalogRow | undefined;
+    return row ? segmentFromRow(row) : null;
+  }
+
   upsertSegment(segment: CatalogSegmentInput) {
     this.#database.prepare(`
       INSERT INTO recording_segments (
@@ -100,6 +116,29 @@ export class RecordingCatalog {
       segment.sizeBytes,
       segment.observedAtMs
     );
+  }
+
+  relocateSegment(previousRelativePath: string, segment: CatalogSegmentInput) {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#relocateSegment(previousRelativePath, segment);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #relocateSegment(previousRelativePath: string, segment: CatalogSegmentInput) {
+    if (previousRelativePath === segment.relativePath) {
+      this.upsertSegment(segment);
+      return;
+    }
+    this.upsertSegment(segment);
+    this.#database
+      .prepare('UPDATE recording_thumbnails SET relative_path = ? WHERE relative_path = ?')
+      .run(segment.relativePath, previousRelativePath);
+    this.#database.prepare('DELETE FROM recording_segments WHERE relative_path = ?').run(previousRelativePath);
   }
 
   expireSegment(relativePath: string, expiredAtMs = Date.now()) {
@@ -293,6 +332,9 @@ export class RecordingCatalog {
         } else if (event.type === 'recording.segment.expired') {
           const payload = event.payload as RecordingSegmentExpiredPayload;
           this.expireSegment(payload.relativePath, event.ts_ms);
+        } else if (event.type === 'recording.segment.relocated') {
+          const payload = event.payload as RecordingSegmentRelocatedPayload;
+          this.#relocateSegment(payload.previousRelativePath, { ...payload, observedAtMs: event.ts_ms });
         }
       }
       this.#database.exec('COMMIT');
@@ -411,7 +453,11 @@ export async function syncRecordingCatalogFromEvents(catalog: RecordingCatalog, 
       }
       try {
         const event = JSON.parse(line) as PatrolEvent;
-        if (event.type === 'recording.segment.observed' || event.type === 'recording.segment.expired') {
+        if (
+          event.type === 'recording.segment.observed' ||
+          event.type === 'recording.segment.expired' ||
+          event.type === 'recording.segment.relocated'
+        ) {
           batch.push(event);
           if (batch.length >= 5000) {
             catalog.applyEvents(batch.splice(0));

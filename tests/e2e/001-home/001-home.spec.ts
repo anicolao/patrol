@@ -599,13 +599,13 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
           await expect(drivewayPreview).toBeVisible();
           await expect(drivewayPreview).toHaveAttribute(
             'src',
-            '/api/recordings/thumbnail?path=driveway_main%2F1781099196.mp4'
+            '/api/recordings/thumbnail?path=driveway_main%2F2026%2F06%2F10%2F13%2F1781099196000.m4v'
           );
           await expect(page.getByTestId('recording-video')).toHaveCount(0);
           await page.getByRole('button', { name: 'Play driveway recording' }).click();
           await expect(page.getByTestId('recording-video')).toHaveAttribute(
             'src',
-            /\/api\/recordings\/file\?path=driveway_main%2F1781099196\.mp4#t=0/
+            /\/api\/recordings\/file\?path=driveway_main%2F2026%2F06%2F10%2F13%2F1781099196000\.m4v#t=0/
           );
           await page.getByRole('button', { name: 'Show thumbnail' }).click();
           await expect(page.getByAltText(/Preview frame from driveway/)).toBeVisible();
@@ -1106,7 +1106,7 @@ function recordingState(eventAtMs: number): CameraDiscoveryState['recordings'] {
     endMs: 1781099256000,
     durationMs: 60000,
     sizeBytes: 32000000,
-    relativePath: 'driveway_main/1781099196.mp4',
+    relativePath: 'driveway_main/2026/06/10/13/1781099196000.m4v',
     observedAtMs: eventAtMs + 1000
   };
 

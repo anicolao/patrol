@@ -99,6 +99,18 @@
               node --experimental-strip-types scripts/sync-recording-catalog.mjs
             '';
           };
+          patrol-recording-backfill = pkgs.writeShellApplication {
+            name = "patrol-recording-backfill";
+            runtimeInputs = [
+              pkgs.ffmpeg
+              pkgs.git
+              pkgs.nodejs_24
+            ];
+            text = ''
+              ${patrolRevisionEnv}
+              node --experimental-strip-types scripts/backfill-recordings.mjs
+            '';
+          };
           patrol-thumbnailer = pkgs.writeShellApplication {
             name = "patrol-thumbnailer";
             runtimeInputs = [
@@ -206,6 +218,7 @@
               patrol-branch-audit
               patrol-person-recognizer
               patrol-recording-catalog-sync
+              patrol-recording-backfill
               patrol-recorder
               patrol-recorder-launch-agent-install
               patrol-service-launch-agents-install

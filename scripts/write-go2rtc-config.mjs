@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { appendCameraEvent } from './lib/patrol-events.mjs';
 
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
@@ -10,39 +11,66 @@ const go2rtcApiBaseUrl = process.env.PATROL_GO2RTC_API_BASE_URL ?? 'http://127.0
 const go2rtcApiListen = process.env.PATROL_GO2RTC_API_LISTEN ?? '0.0.0.0:1984';
 const go2rtcRtspListen = process.env.PATROL_GO2RTC_RTSP_LISTEN ?? '127.0.0.1:8554';
 const go2rtcWebrtcListen = process.env.PATROL_GO2RTC_WEBRTC_LISTEN ?? ':8555';
+let fallbackCameras = null;
 
-const cameras = reduceCameras(await readJsonlDir(eventsDir, 'cameras-'));
-const secrets = latestSecretsByCamera(await readJsonlDir(secretsDir, 'secrets-'));
-const configured = cameras.filter((camera) => secrets.has(camera.id));
-const config = renderConfig(configured, secrets);
+export async function materializeGo2rtcConfig() {
+  const cameras = await configuredCameras();
+  const secrets = latestSecretsByCamera(await readJsonlDir(secretsDir, 'secrets-'));
+  const configured = cameras.filter((camera) => secrets.has(camera.id));
+  const config = renderConfig(configured, secrets);
 
-await mkdir(go2rtcDir, { recursive: true, mode: 0o700 });
-const configPath = path.join(go2rtcDir, 'go2rtc.yaml');
-const previousConfig = await readTextFile(configPath);
-if (previousConfig !== config) {
-  await writeFile(configPath, config, { encoding: 'utf8', mode: 0o600 });
-  await appendCameraEvent({
-    type: 'go2rtc.config.materialized',
-    source: 'patrol-go2rtc-config',
-    payload: {
-      apiBaseUrl: go2rtcApiBaseUrl,
-      configPath,
-      streams: configured.flatMap((camera) => [
-        {
-          cameraId: camera.id,
-          role: 'main',
-          streamName: camera.streams.main
-        },
-        {
-          cameraId: camera.id,
-          role: 'sub',
-          streamName: camera.streams.sub
-        }
-      ])
-    }
-  });
+  await mkdir(go2rtcDir, { recursive: true, mode: 0o700 });
+  const configPath = path.join(go2rtcDir, 'go2rtc.yaml');
+  const previousConfig = await readTextFile(configPath);
+  if (previousConfig !== config) {
+    await writeFile(configPath, config, { encoding: 'utf8', mode: 0o600 });
+    await appendCameraEvent({
+      type: 'go2rtc.config.materialized',
+      source: 'patrol-go2rtc-config',
+      payload: {
+        apiBaseUrl: go2rtcApiBaseUrl,
+        configPath,
+        streams: configured.flatMap((camera) => [
+          {
+            cameraId: camera.id,
+            role: 'main',
+            streamName: camera.streams.main
+          },
+          {
+            cameraId: camera.id,
+            role: 'sub',
+            streamName: camera.streams.sub
+          }
+        ])
+      }
+    });
+  }
+  return configPath;
 }
-console.log(configPath);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  console.log(await materializeGo2rtcConfig());
+}
+
+async function configuredCameras() {
+  try {
+    const checkpoint = JSON.parse(await readFile(path.join(dataRoot, 'cache', 'server-camera-state.json'), 'utf8'));
+    const devices = checkpoint?.state?.devices;
+    if (Array.isArray(devices)) {
+      return devices
+        .filter((camera) => camera?.id && camera?.credentials && camera?.streams?.main && camera?.streams?.sub)
+        .map((camera) => ({
+          id: camera.id,
+          remoteAddress: camera.remoteAddress,
+          streams: camera.streams
+        }));
+    }
+  } catch {
+    // A first-run deployment can bootstrap from events before its first checkpoint exists.
+  }
+  fallbackCameras ??= reduceCameras(await readJsonlDir(eventsDir, 'cameras-'));
+  return fallbackCameras;
+}
 
 async function readTextFile(filePath) {
   try {
@@ -123,7 +151,7 @@ function latestSecretsByCamera(events) {
   return secrets;
 }
 
-function renderConfig(cameras, secrets) {
+export function renderConfig(cameras, secrets) {
   return [
     'api:',
     `  listen: ${yamlString(go2rtcApiListen)}`,
@@ -134,11 +162,15 @@ function renderConfig(cameras, secrets) {
     'streams:',
     ...cameras.flatMap((camera) => {
       const credentials = secrets.get(camera.id);
+      const currentCredentials = {
+        ...credentials,
+        host: camera.remoteAddress ?? credentials.host
+      };
       return [
         `  ${yamlKey(camera.streams.main)}:`,
-        `    - ${yamlString(annkeRtspUrl(credentials, 'main'))}`,
+        `    - ${yamlString(annkeRtspUrl(currentCredentials, 'main'))}`,
         `  ${yamlKey(camera.streams.sub)}:`,
-        `    - ${yamlString(annkeRtspUrl(credentials, 'sub'))}`
+        `    - ${yamlString(annkeRtspUrl(currentCredentials, 'sub'))}`
       ];
     })
   ].join('\n') + '\n';
