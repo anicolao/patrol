@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { appendProcessExited, startProcessHeartbeats } from './lib/patrol-events.mjs';
+import { materializeGo2rtcConfig } from './write-go2rtc-config.mjs';
 
-const configPath = await materializeConfig();
+const configPath = await materializeGo2rtcConfig();
 let configText = await readConfig(configPath);
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-go2rtc',
@@ -13,10 +14,11 @@ const heartbeat = startProcessHeartbeats({
 const configRefreshMs = Number(process.env.PATROL_GO2RTC_CONFIG_REFRESH_MS ?? '10000');
 let restartingForConfig = false;
 let shuttingDown = false;
+let refreshInFlight = false;
 
 let child = startGo2rtc(configPath);
 let refresh = setInterval(() => {
-  void refreshConfig();
+  void refreshConfigIfIdle();
 }, configRefreshMs);
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -60,45 +62,30 @@ function startGo2rtc(path) {
   return childProcess;
 }
 
-async function refreshConfig() {
-  const nextConfigPath = await materializeConfig();
-  const nextConfigText = await readConfig(nextConfigPath);
-  if (nextConfigText === configText) {
+async function refreshConfigIfIdle() {
+  if (refreshInFlight || shuttingDown) {
     return;
   }
+  refreshInFlight = true;
+  try {
+    const nextConfigPath = await materializeGo2rtcConfig();
+    const nextConfigText = await readConfig(nextConfigPath);
+    if (nextConfigText === configText) {
+      return;
+    }
 
-  configText = nextConfigText;
-  restartingForConfig = true;
-  child.kill('SIGTERM');
+    configText = nextConfigText;
+    restartingForConfig = true;
+    child.kill('SIGTERM');
+  } catch (error) {
+    console.error('go2rtc config refresh failed:', error);
+  } finally {
+    refreshInFlight = false;
+  }
 }
 
 async function readConfig(path) {
   return await readFile(path, 'utf8');
-}
-
-async function materializeConfig() {
-  const childProcess = spawn(process.execPath, ['scripts/write-go2rtc-config.mjs'], {
-    stdio: ['ignore', 'pipe', 'inherit']
-  });
-  let stdout = '';
-  childProcess.stdout.on('data', (chunk) => {
-    stdout += chunk;
-  });
-
-  const exitCode = await new Promise((resolve) => {
-    childProcess.on('exit', resolve);
-  });
-
-  if (exitCode !== 0) {
-    throw new Error(`go2rtc config materialization failed with exit code ${exitCode}`);
-  }
-
-  const configPath = stdout.trim().split('\n').at(-1);
-  if (!configPath) {
-    throw new Error('go2rtc config materialization did not print a config path');
-  }
-
-  return configPath;
 }
 
 function signalNumber(signal) {

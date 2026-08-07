@@ -275,6 +275,28 @@ export interface RecordingSegmentExpiredPayload {
   retentionDays: number;
 }
 
+export interface RecordingSegmentRelocatedPayload extends RecordingSegmentObservedPayload {
+  previousRelativePath: string;
+  previousSizeBytes: number;
+}
+
+export interface RecordingStreamInterruptedPayload {
+  cameraId: string;
+  role: RecordingStreamRole;
+  streamName: string;
+  interruptedAtMs: number;
+  exitCode: number | null;
+  signal: string | null;
+  detail: string;
+}
+
+export interface RecordingStreamRecoveredPayload {
+  cameraId: string;
+  role: RecordingStreamRole;
+  streamName: string;
+  recoveredAtMs: number;
+}
+
 export interface SystemProcessExitedPayload extends SystemProcessHeartbeatPayload {
   exitCode: number | null;
   signal: string | null;
@@ -383,6 +405,13 @@ export function reduceCameraDiscoveryEvents(
       continue;
     }
 
+    if (event.type === 'recording.segment.relocated') {
+      const relocated = event as PatrolEvent<RecordingSegmentRelocatedPayload>;
+      recordingSegmentsByPath.delete(relocated.payload.previousRelativePath);
+      recordingSegmentsByPath.set(relocated.payload.relativePath, recordingSegmentFromObserved(relocated));
+      continue;
+    }
+
     if (event.type !== 'camera.discovery.completed') {
       continue;
     }
@@ -435,7 +464,7 @@ export function reduceCameraDiscoveryEvents(
   if (!latestCompleted) {
     return {
       staleAfterMs: DISCOVERY_STALE_AFTER_MS,
-      processes: reduceSystemProcesses(events, systemEvents),
+      processes: reduceSystemProcesses(events, systemEvents, []),
       devices: [],
       recordings: buildRecordingState([], [], 0),
       people: buildPersonRecognitionState(personEvents),
@@ -458,7 +487,7 @@ export function reduceCameraDiscoveryEvents(
 
   return {
     staleAfterMs: DISCOVERY_STALE_AFTER_MS,
-    processes: reduceSystemProcesses(events, systemEvents),
+    processes: reduceSystemProcesses(events, systemEvents, devices),
     devices,
     recordings: buildRecordingState(recordingSegments, alertEvents, devices.length),
     people: buildPersonRecognitionState(personEvents),
@@ -493,6 +522,7 @@ function reduceCameraDiscoveryStateEvent(
   state: CameraDiscoveryState,
   streamedEvent: StreamedPatrolEvent
 ): CameraDiscoveryState {
+  state = withExpectedRecordingStreamProcesses(state);
   const { event, stream } = streamedEvent;
 
   if (stream === 'system') {
@@ -544,6 +574,20 @@ function reduceCameraDiscoveryStateEvent(
       return withRecordingSegmentObserved(state, event as PatrolEvent<RecordingSegmentObservedPayload>);
     case 'recording.segment.expired':
       return withRecordingSegmentExpired(state, event as PatrolEvent<RecordingSegmentExpiredPayload>);
+    case 'recording.segment.relocated':
+      return withRecordingSegmentRelocated(state, event as PatrolEvent<RecordingSegmentRelocatedPayload>);
+    case 'recording.stream.interrupted':
+      return withRecordingStreamHealthEvent(
+        state,
+        event as PatrolEvent<RecordingStreamInterruptedPayload>,
+        'error'
+      );
+    case 'recording.stream.recovered':
+      return withRecordingStreamHealthEvent(
+        state,
+        event as PatrolEvent<RecordingStreamRecoveredPayload>,
+        null
+      );
     case 'person.recognition.sample.analyzed':
       return withPersonRecognitionSampleAnalyzed(
         state,
@@ -815,17 +859,7 @@ function withRecordingSegmentObserved(
     return state;
   }
 
-  const segment = {
-    cameraId: event.payload.cameraId,
-    role: event.payload.role,
-    streamName: event.payload.streamName,
-    startMs: event.payload.startMs,
-    endMs: event.payload.startMs + event.payload.durationMs,
-    durationMs: event.payload.durationMs,
-    sizeBytes: event.payload.sizeBytes,
-    relativePath: event.payload.relativePath,
-    observedAtMs: event.ts_ms
-  };
+  const segment = recordingSegmentFromObserved(event);
   const segments =
     state.recordings.segments[0] && compareRecordingSegments(segment, state.recordings.segments[0]) > 0
       ? [segment, ...state.recordings.segments].sort(compareRecordingSegments)
@@ -833,7 +867,7 @@ function withRecordingSegmentObserved(
   const observedBytes =
     state.recordings.storage.observedBytes + segment.sizeBytes;
 
-  return withProcessEvent(
+  const nextState = withProcessEvent(
     {
       ...state,
       recordings: recordingStateFromReviewedEvents(
@@ -852,6 +886,59 @@ function withRecordingSegmentObserved(
       healthOverride: null
     }
   );
+  return withProcessEvent(nextState, recordingStreamProcessId(event.payload.streamName), {
+    tsMs: event.ts_ms,
+    eventType: event.type,
+    detail: `${event.payload.role} segment finalized for ${event.payload.streamName}`,
+    gitRevision: null,
+    healthOverride: null
+  });
+}
+
+function withRecordingSegmentRelocated(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<RecordingSegmentRelocatedPayload>
+): CameraDiscoveryState {
+  const segment = recordingSegmentFromObserved(event);
+  const segments = [
+    segment,
+    ...state.recordings.segments.filter(
+      (candidate) =>
+        candidate.relativePath !== event.payload.previousRelativePath &&
+        candidate.relativePath !== event.payload.relativePath
+    )
+  ].sort(compareRecordingSegments);
+  const relocatedEvents = state.recordings.events.map((reviewEvent) =>
+    reviewEvent.preferredSegment?.relativePath === event.payload.previousRelativePath
+      ? { ...reviewEvent, preferredSegment: segment }
+      : reviewEvent
+  );
+  return {
+    ...state,
+    recordings: recordingStateFromReviewedEvents(
+      segments,
+      refreshReviewEventsForSegment(relocatedEvents, segment),
+      state.devices.length,
+      state.recordings.storage.observedBytes - event.payload.previousSizeBytes + segment.sizeBytes
+    )
+  };
+}
+
+function withRecordingStreamHealthEvent(
+  state: CameraDiscoveryState,
+  event: PatrolEvent<RecordingStreamInterruptedPayload | RecordingStreamRecoveredPayload>,
+  healthOverride: SystemProcessStatus['health'] | null
+) {
+  const interrupted = event.payload as RecordingStreamInterruptedPayload;
+  return withProcessEvent(state, recordingStreamProcessId(event.payload.streamName), {
+    tsMs: event.ts_ms,
+    eventType: event.type,
+    detail: healthOverride === 'error'
+      ? interrupted.detail
+      : `${event.payload.role} recording recovered for ${event.payload.streamName}`,
+    gitRevision: null,
+    healthOverride
+  });
 }
 
 function withRecordingSegmentExpired(
@@ -1002,7 +1089,8 @@ function personRecognitionState(state: CameraDiscoveryState): PersonRecognitionS
 
 function reduceSystemProcesses(
   cameraEvents: PatrolEvent[],
-  systemEvents: PatrolEvent[]
+  systemEvents: PatrolEvent[],
+  devices: DiscoveredCamera[]
 ): SystemProcessStatus[] {
   const nowMs = Date.now();
   const latestByProcessId = new Map<
@@ -1086,6 +1174,35 @@ function reduceSystemProcesses(
         gitRevision: null,
         healthOverride: null
       });
+      updateProcessEvent(latestByProcessId, recordingStreamProcessId(observed.payload.streamName), {
+        tsMs: observed.ts_ms,
+        eventType: observed.type,
+        detail: `${observed.payload.role} segment finalized for ${observed.payload.streamName}`,
+        gitRevision: null,
+        healthOverride: null
+      });
+    }
+
+    if (event.type === 'recording.stream.interrupted') {
+      const interrupted = event as PatrolEvent<RecordingStreamInterruptedPayload>;
+      updateProcessEvent(latestByProcessId, recordingStreamProcessId(interrupted.payload.streamName), {
+        tsMs: interrupted.ts_ms,
+        eventType: interrupted.type,
+        detail: interrupted.payload.detail,
+        gitRevision: null,
+        healthOverride: 'error'
+      });
+    }
+
+    if (event.type === 'recording.stream.recovered') {
+      const recovered = event as PatrolEvent<RecordingStreamRecoveredPayload>;
+      updateProcessEvent(latestByProcessId, recordingStreamProcessId(recovered.payload.streamName), {
+        tsMs: recovered.ts_ms,
+        eventType: recovered.type,
+        detail: `${recovered.payload.role} recording recovered for ${recovered.payload.streamName}`,
+        gitRevision: null,
+        healthOverride: null
+      });
     }
 
     if (event.type === 'person.recognition.sample.analyzed') {
@@ -1121,7 +1238,20 @@ function reduceSystemProcesses(
     }
   }
 
-  return SYSTEM_PROCESS_TASKS.map((task) => {
+  const recordingStreamTasks = devices
+    .filter((camera) => camera.credentials)
+    .flatMap((camera) => (['main', 'sub'] as const).map((role) => {
+      const streamName = camera.streams[role];
+      return {
+        id: recordingStreamProcessId(streamName),
+        label: `${camera.name ?? camera.hardware ?? camera.remoteAddress} ${role} recording`,
+        kind: 'worker' as const,
+        expectedEveryMs: PROCESS_STALE_AFTER_MS,
+        detail: `Finalizes ${streamName} at least once every ${PROCESS_STALE_AFTER_MS / 1000} seconds`
+      };
+    }));
+
+  return [...SYSTEM_PROCESS_TASKS, ...recordingStreamTasks].map((task) => {
     const latest = latestByProcessId.get(task.id);
     const stale = latest ? nowMs - latest.tsMs > task.expectedEveryMs : false;
     const health = !latest
@@ -1575,6 +1705,56 @@ function segmentPreferredForEvent(event: ReviewableSecurityEvent, segment: Recor
 
 function compareRecordingSegments(left: RecordingSegment, right: RecordingSegment) {
   return right.startMs - left.startMs || left.relativePath.localeCompare(right.relativePath);
+}
+
+function recordingSegmentFromObserved(
+  event: PatrolEvent<RecordingSegmentObservedPayload | RecordingSegmentRelocatedPayload>
+): RecordingSegment {
+  return {
+    cameraId: event.payload.cameraId,
+    role: event.payload.role,
+    streamName: event.payload.streamName,
+    startMs: event.payload.startMs,
+    endMs: event.payload.startMs + event.payload.durationMs,
+    durationMs: event.payload.durationMs,
+    sizeBytes: event.payload.sizeBytes,
+    relativePath: event.payload.relativePath,
+    observedAtMs: event.ts_ms
+  };
+}
+
+function recordingStreamProcessId(streamName: string) {
+  return `patrol-recorder-stream:${streamName}`;
+}
+
+function withExpectedRecordingStreamProcesses(state: CameraDiscoveryState) {
+  const existingIds = new Set(state.processes.map((process) => process.id));
+  const additions: SystemProcessStatus[] = [];
+  for (const camera of state.devices) {
+    if (!camera.credentials) {
+      continue;
+    }
+    for (const role of ['main', 'sub'] as const) {
+      const streamName = camera.streams[role];
+      const id = recordingStreamProcessId(streamName);
+      if (existingIds.has(id)) {
+        continue;
+      }
+      existingIds.add(id);
+      additions.push({
+        id,
+        label: `${camera.name ?? camera.hardware ?? camera.remoteAddress} ${role} recording`,
+        kind: 'worker',
+        expectedEveryMs: PROCESS_STALE_AFTER_MS,
+        lastAliveAtMs: null,
+        lastEventType: null,
+        gitRevision: null,
+        health: 'missing',
+        detail: `Waiting for ${streamName} to finalize a recording segment`
+      });
+    }
+  }
+  return additions.length === 0 ? state : { ...state, processes: [...state.processes, ...additions] };
 }
 
 function compareDevices(left: DiscoveredCamera, right: DiscoveredCamera) {

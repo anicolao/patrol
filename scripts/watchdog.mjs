@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { refreshProcessHealth } from './lib/process-health.mjs';
 import {
   appendProcessHeartbeat,
   appendSystemEvent
@@ -198,29 +199,6 @@ async function readRecentProcessEvents() {
     }
   }
   return latestByProcessId;
-}
-
-function refreshProcessHealth(process, recentEvent) {
-  const storedLastAliveAtMs = typeof process.lastAliveAtMs === 'number' ? process.lastAliveAtMs : null;
-  const useRecentEvent = recentEvent && (storedLastAliveAtMs === null || recentEvent.tsMs >= storedLastAliveAtMs);
-  const lastAliveAtMs = useRecentEvent ? recentEvent.tsMs : storedLastAliveAtMs;
-  const expectedEveryMs = Number(process.expectedEveryMs ?? 90_000);
-  const eventType = useRecentEvent ? recentEvent.eventType : process.lastEventType;
-  const health =
-    eventType === 'system.process.exited'
-      ? 'error'
-      : lastAliveAtMs === null
-        ? 'missing'
-        : Date.now() - lastAliveAtMs > expectedEveryMs
-          ? 'stale'
-          : 'ok';
-
-  return {
-    ...process,
-    lastAliveAtMs,
-    health,
-    detail: useRecentEvent && recentEvent.detail ? recentEvent.detail : process.detail
-  };
 }
 
 function failedCheck(failures) {
