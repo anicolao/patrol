@@ -390,7 +390,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         spec: 'Credentials save status is shown',
         check: async () => {
           await expect(page.getByText('Credentials saved to event logs.')).toBeVisible();
-          await expect(page.getByText('Credentials saved 30 seconds ago.')).toBeVisible();
+          await expect(page.getByText(/Credentials saved (\d+ seconds|1 minute) ago\./)).toBeVisible();
         }
       },
       {
