@@ -78,6 +78,51 @@ test('catalog queries windows, bounds, expiration, and incremental event sync', 
   }
 });
 
+test('catalog relocates legacy segments and preserves thumbnail tracking', async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), 'patrol-recording-relocation-'));
+  const catalog = await openRecordingCatalog(dataRoot);
+  try {
+    catalog.upsertSegment({
+      cameraId: 'camera-1',
+      role: 'main',
+      streamName: 'camera_main',
+      startMs: 100_000,
+      durationMs: 15_000,
+      sizeBytes: 1024,
+      relativePath: 'camera_main/100.mp4',
+      observedAtMs: 116_000
+    });
+    catalog.markThumbnailGenerated('camera_main/100.mp4', 'camera_main/1970/01/01/00/100.jpg', 512);
+    catalog.relocateSegment('camera_main/100.mp4', {
+      cameraId: 'camera-1',
+      role: 'main',
+      streamName: 'camera_main',
+      startMs: 100_000,
+      durationMs: 17_250,
+      sizeBytes: 2048,
+      relativePath: 'camera_main/1970/01/01/00/100000.m4v',
+      observedAtMs: 120_000
+    });
+
+    assert.equal(catalog.segmentForPath('camera_main/100.mp4'), null);
+    assert.deepEqual(catalog.segmentForPath('camera_main/1970/01/01/00/100000.m4v'), {
+      cameraId: 'camera-1',
+      role: 'main',
+      streamName: 'camera_main',
+      startMs: 100_000,
+      endMs: 117_250,
+      durationMs: 17_250,
+      sizeBytes: 2048,
+      relativePath: 'camera_main/1970/01/01/00/100000.m4v',
+      observedAtMs: 120_000
+    });
+    assert.deepEqual(catalog.thumbnailSummary(), { tracked: 1, generated: 1, failed: 0 });
+  } finally {
+    catalog.close();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
 function observedEvent(relativePath, startMs, role) {
   return {
     id: `observed-${relativePath}`,

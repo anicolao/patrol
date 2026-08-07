@@ -21,6 +21,12 @@ The system health dashboard expects these tasks to stay green:
 - `patrol-person-recognizer`
 - `patrol-watchdog`
 
+Configured camera streams also appear as dynamic tasks named
+`patrol-recorder-stream:<stream-name>`. Each must finalize a segment within 90
+seconds. A stalled FFmpeg process is terminated and restarted, and interruption
+and recovery events keep the watchdog red until that specific stream records
+again.
+
 ## Local Secrets
 
 Create `.patrol/watchdog.env` locally. Do not commit it.
