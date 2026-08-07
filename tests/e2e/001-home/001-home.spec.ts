@@ -26,7 +26,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     staleAfterMs: 60 * 60 * 1000,
     processes: systemProcesses(fixedNowMs - 15000),
     recordings: annke ? recordingState(fixedNowMs - 4000) : emptyRecordings(),
-    people: emptyPeople(),
+    people: annke ? personRecognitionState(fixedNowMs - 4000) : emptyPeople(),
     errors: [],
     lastDiscovery: {
       runId: 'discovery-run-1',
@@ -247,6 +247,18 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
       body: recordingThumbnailSvg()
     });
   });
+  await page.route('**/api/person-recognition/crops**', async (route) => {
+    await route.fulfill({
+      contentType: 'image/svg+xml',
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="260" viewBox="0 0 160 260">
+        <rect width="160" height="260" fill="#e5e7eb"/>
+        <circle cx="82" cy="54" r="22" fill="#4b5563"/>
+        <path d="M64 84h40l16 72-24 4 4 72H78l-7-66-15 66H34l19-76z" fill="#374151"/>
+        <path d="M63 92 34 139l-16-9 34-54zM103 94l35 43-14 12-38-46z" fill="#4b5563"/>
+        <path d="M77 232h26v16H72zM25 232h30v16H20z" fill="#111827"/>
+      </svg>`
+    });
+  });
   await page.route('**/api/recordings/history**', async (route) => {
     const recordings = recordingState(fixedNowMs - 4000);
     await route.fulfill({
@@ -385,6 +397,11 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   await tester.step('credentials-saved', {
     description: 'Camera credentials are accepted',
     networkStatus: 'skip',
+    beforeScreenshot: async () => {
+      await page
+        .getByText(/Credentials saved (\d+ seconds|1 minute) ago\./)
+        .evaluate((element) => (element.textContent = 'Credentials saved 30 seconds ago.'));
+    },
     verifications: [
       {
         spec: 'Credentials save status is shown',
@@ -685,6 +702,49 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
         check: async () => {
           await expect(page.getByText(/Annke AI alert active · observed (0 seconds|1 minute) ago/)).toBeVisible();
           await expect(page.getByText('Last alert: vehicle active', { exact: false })).toBeVisible();
+        }
+      }
+    ]
+  });
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByTestId('tab-people').click();
+  await tester.step('person-recognition', {
+    description: 'Unknown person samples can be labeled from high-resolution crops',
+    networkStatus: 'skip',
+    verifications: [
+      {
+        spec: 'People tab is selected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'People', exact: true })).toBeVisible();
+          await expect(page.getByTestId('tab-people')).toHaveAttribute('aria-current', 'page');
+        }
+      },
+      {
+        spec: 'Person recognition summary is shown',
+        check: async () => {
+          await expect(page.getByTestId('people-summary')).toContainText('Unknown');
+          await expect(page.getByTestId('people-summary')).toContainText('2');
+        }
+      },
+      {
+        spec: 'Recognized sample can be bulk accepted or corrected',
+        check: async () => {
+          await expect(page.getByRole('heading', { name: 'Recognized as Alex' })).toBeVisible();
+          await expect(page.getByRole('heading', { name: 'Suggested GUID 12345678' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Accept all' })).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Label all GUID 12345678' })).toBeVisible();
+          await expect(page.getByTestId('person-sample-card')).toHaveCount(2);
+          await expect(page.getByAltText(/Person sample/).first()).toHaveAttribute(
+            'src',
+            '/api/person-recognition/crops?path=annke-alert-human-1-person.jpg'
+          );
+          await expect(page.getByText('Suggested Alex (93%)')).toBeVisible();
+          await expect(page.getByText('Suggested GUID 12345678 (61%)')).toBeVisible();
+          await expect(page.getByAltText(/Reference Alex sample/).first()).toBeVisible();
+          await expect(page.getByAltText(/Reference GUID 12345678 sample/).first()).toBeVisible();
+          await expect(page.getByRole('button', { name: 'Dismiss' })).toHaveCount(2);
+          await expect(page.getByLabel('Correct label')).toHaveCount(2);
         }
       }
     ]
@@ -1080,6 +1140,147 @@ function emptyPeople(): CameraDiscoveryState['people'] {
     labelCounts: {},
     unlabeledCount: 0,
     labeledCount: 0
+  };
+}
+
+function personRecognitionState(eventAtMs: number): CameraDiscoveryState['people'] {
+  const anonymousLabel = 'anonymous:12345678-90ab-cdef-1234-567890abcdef';
+  return {
+    samples: [
+      {
+        id: 'annke-alert-human-alex-reference-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-alex-reference',
+        occurredAtMs: eventAtMs - 180_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-alex-reference-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-alex-reference-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/2026/06/10/13/1781099190000.m4v',
+        sourceOffsetMs: 2000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.1, 0.2, 0.3]
+        },
+        label: 'Alex',
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: null,
+        analyzedAtMs: eventAtMs - 178_000,
+        labeledAtMs: eventAtMs - 177_000,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-guid-reference-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-guid-reference',
+        occurredAtMs: eventAtMs - 120_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-guid-reference-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-guid-reference-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/2026/06/10/13/1781099192000.m4v',
+        sourceOffsetMs: 2000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.4, 0.1, 0.2]
+        },
+        label: anonymousLabel,
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: null,
+        analyzedAtMs: eventAtMs - 118_000,
+        labeledAtMs: eventAtMs - 117_000,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-1-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-1',
+        occurredAtMs: eventAtMs,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-1-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-1-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/2026/06/10/13/1781099196000.m4v',
+        sourceOffsetMs: 4000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.1, 0.2, 0.3]
+        },
+        label: null,
+        suggestedLabel: 'Alex',
+        suggestedScore: 0.93,
+        error: null,
+        analyzedAtMs: eventAtMs + 2000,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-3-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-3',
+        occurredAtMs: eventAtMs - 30_000,
+        status: 'analyzed',
+        cropRelativePath: 'annke-alert-human-3-person.jpg',
+        cropUrl: '/api/person-recognition/crops?path=annke-alert-human-3-person.jpg',
+        cropBox: null,
+        cropMethod: 'motion_diff',
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: 'driveway_main/2026/06/10/13/1781099195000.m4v',
+        sourceOffsetMs: 4000,
+        embedding: {
+          model: 'apple-vision-featureprint',
+          dimensions: 3,
+          vector: [0.4, 0.1, 0.2]
+        },
+        label: null,
+        suggestedLabel: anonymousLabel,
+        suggestedScore: 0.61,
+        error: null,
+        analyzedAtMs: eventAtMs + 1500,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      },
+      {
+        id: 'annke-alert-human-2-person',
+        cameraId: 'uuid:driveway-camera',
+        sourceEventId: 'annke-alert-human-2',
+        occurredAtMs: eventAtMs - 60_000,
+        status: 'failed',
+        cropRelativePath: null,
+        cropUrl: null,
+        cropBox: null,
+        cropMethod: null,
+        cropVersion: 'motion-diff-v3',
+        sourceSegmentRelativePath: null,
+        sourceOffsetMs: null,
+        embedding: null,
+        label: null,
+        suggestedLabel: null,
+        suggestedScore: null,
+        error: 'Vision did not find a person segmentation mask',
+        analyzedAtMs: eventAtMs + 1000,
+        labeledAtMs: null,
+        dismissedAtMs: null
+      }
+    ],
+    labels: ['Alex', anonymousLabel],
+    labelCounts: {
+      Alex: 1,
+      [anonymousLabel]: 1
+    },
+    unlabeledCount: 2,
+    labeledCount: 2
   };
 }
 
