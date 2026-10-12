@@ -13,7 +13,9 @@ const capabilityPaths = [
   '/ISAPI/Smart/capabilities'
 ];
 const durationMs = Number(process.env.PATROL_ANNKE_ALERT_DURATION_MS ?? '0');
-const credentials = latestCameraCredentials(await readJsonlDir(secretsDir, 'secrets-'));
+const reconnectBaseMs = Number(process.env.PATROL_ANNKE_RECONNECT_INTERVAL_MS ?? '5000');
+const reconnectMaxMs = Number(process.env.PATROL_ANNKE_RECONNECT_MAX_INTERVAL_MS ?? '60000');
+const credentials = await loadLatestCameraCredentials();
 const heartbeat = startProcessHeartbeats({
   processId: 'patrol-annke-events',
   label: 'Annke alert worker',
@@ -27,8 +29,35 @@ if (credentials.length === 0) {
   process.exit(1);
 }
 
-await Promise.all(credentials.map((cameraCredentials) => observeCamera(cameraCredentials)));
+await Promise.all(credentials.map(({ cameraId }) => superviseCamera(cameraId)));
 clearInterval(heartbeat);
+
+async function superviseCamera(cameraId) {
+  let reconnectMs = reconnectBaseMs;
+  while (true) {
+    const startedAtMs = Date.now();
+    const cameraCredentials = (await loadLatestCameraCredentials())
+      .find((candidate) => candidate.cameraId === cameraId);
+    if (cameraCredentials) {
+      await observeCamera(cameraCredentials);
+    }
+
+    const connectedForMs = Date.now() - startedAtMs;
+    const retryInMs = connectedForMs >= reconnectMaxMs ? reconnectBaseMs : reconnectMs;
+    const nextReconnectMs = connectedForMs >= reconnectMaxMs
+      ? reconnectBaseMs
+      : Math.min(reconnectMaxMs, reconnectMs * 2);
+    if (!cameraCredentials) {
+      console.error(`No current credentials found for camera ${cameraId}; retrying in ${retryInMs} ms`);
+    } else {
+      console.error(
+        `Annke observer for ${cameraId} at ${cameraCredentials.host} disconnected; retrying in ${retryInMs} ms`
+      );
+    }
+    await sleep(retryInMs);
+    reconnectMs = nextReconnectMs;
+  }
+}
 
 async function observeCamera(cameraCredentials) {
   await observeCapabilities(cameraCredentials);
@@ -246,6 +275,14 @@ function latestCameraCredentials(events) {
     }
   }
   return Array.from(byCameraId.values());
+}
+
+async function loadLatestCameraCredentials() {
+  return latestCameraCredentials(await readJsonlDir(secretsDir, 'secrets-'));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function appendCameraEvent(event) {

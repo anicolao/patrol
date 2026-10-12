@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { rediscoverUnavailableCameras } from './lib/camera-rediscovery.mjs';
 import { appendProcessExited, startProcessHeartbeats } from './lib/patrol-events.mjs';
 import { materializeGo2rtcConfig } from './write-go2rtc-config.mjs';
 
@@ -12,9 +13,16 @@ const heartbeat = startProcessHeartbeats({
   detail: `Serving streams from ${configPath}`
 });
 const configRefreshMs = Number(process.env.PATROL_GO2RTC_CONFIG_REFRESH_MS ?? '10000');
+const rediscoveryBaseMs = Number(process.env.PATROL_CAMERA_REDISCOVERY_INTERVAL_MS ?? '60000');
+const rediscoveryMaxMs = Number(process.env.PATROL_CAMERA_REDISCOVERY_MAX_INTERVAL_MS ?? '900000');
+const rediscoveryTimeoutMs = Number(process.env.PATROL_CAMERA_REDISCOVERY_TIMEOUT_MS ?? '15000');
+const rediscoveryStreamsUrl = process.env.PATROL_GO2RTC_STREAMS_URL ?? 'http://127.0.0.1:1984/api/streams';
+const rediscoveryUrl = process.env.PATROL_CAMERA_REDISCOVERY_URL ?? 'http://127.0.0.1:5184/api/cameras/discover';
 let restartingForConfig = false;
 let shuttingDown = false;
 let refreshInFlight = false;
+let rediscoveryBackoffMs = rediscoveryBaseMs;
+let nextRediscoveryAtMs = 0;
 
 let child = startGo2rtc(configPath);
 let refresh = setInterval(() => {
@@ -68,6 +76,7 @@ async function refreshConfigIfIdle() {
   }
   refreshInFlight = true;
   try {
+    await rediscoverCamerasIfDue();
     const nextConfigPath = await materializeGo2rtcConfig();
     const nextConfigText = await readConfig(nextConfigPath);
     if (nextConfigText === configText) {
@@ -81,6 +90,36 @@ async function refreshConfigIfIdle() {
     console.error('go2rtc config refresh failed:', error);
   } finally {
     refreshInFlight = false;
+  }
+}
+
+async function rediscoverCamerasIfDue() {
+  const nowMs = Date.now();
+  if (nowMs < nextRediscoveryAtMs) {
+    return;
+  }
+
+  try {
+    const result = await rediscoverUnavailableCameras({
+      streamsUrl: rediscoveryStreamsUrl,
+      discoveryUrl: rediscoveryUrl,
+      timeoutMs: rediscoveryTimeoutMs
+    });
+    if (!result.attempted) {
+      rediscoveryBackoffMs = rediscoveryBaseMs;
+      nextRediscoveryAtMs = nowMs + rediscoveryBaseMs;
+      return;
+    }
+
+    console.error(
+      `camera rediscovery completed for unavailable streams: ${result.unavailableStreamNames.join(', ')}`
+    );
+    nextRediscoveryAtMs = nowMs + rediscoveryBackoffMs;
+    rediscoveryBackoffMs = Math.min(rediscoveryMaxMs, rediscoveryBackoffMs * 2);
+  } catch (error) {
+    console.error('automatic camera rediscovery failed:', error);
+    nextRediscoveryAtMs = nowMs + rediscoveryBackoffMs;
+    rediscoveryBackoffMs = Math.min(rediscoveryMaxMs, rediscoveryBackoffMs * 2);
   }
 }
 
