@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   appendCameraEvent,
+  appendCameraEvents,
   appendProcessExited,
   startProcessHeartbeats
 } from './lib/patrol-events.mjs';
@@ -34,10 +35,36 @@ const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ??
 const retentionEnabled = !['0', 'false', 'no', 'off'].includes(
   String(process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true').toLowerCase()
 );
+const cleanupOnly = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.PATROL_RECORDING_CLEANUP_ONLY ?? 'false').toLowerCase()
+);
 const segmentSettleMs = Number(process.env.PATROL_RECORDING_SEGMENT_SETTLE_MS ?? '250');
-const segmentFinalizeTimeoutMs = Number(process.env.PATROL_RECORDING_FINALIZE_TIMEOUT_MS ?? '10000');
+const segmentFinalizeTimeoutMs = Number(process.env.PATROL_RECORDING_FINALIZE_TIMEOUT_MS ?? '120000');
 const streamStallTimeoutMs = Number(process.env.PATROL_RECORDING_STALL_TIMEOUT_MS ?? '90000');
-const retentionSweepMs = Number(process.env.PATROL_RECORDING_RETENTION_SWEEP_MS ?? String(60 * 60 * 1000));
+const retentionSweepMs = Number(process.env.PATROL_RECORDING_RETENTION_SWEEP_MS ?? String(10 * 1000));
+const configuredRetentionBatchSize = Number(process.env.PATROL_RECORDING_RETENTION_BATCH_SIZE ?? '1000');
+const retentionBatchSize = Math.max(
+  1,
+  Math.floor(Number.isFinite(configuredRetentionBatchSize) ? configuredRetentionBatchSize : 250)
+);
+const configuredPressureBatchSize = Number(process.env.PATROL_RECORDING_PRESSURE_BATCH_SIZE ?? '2000');
+const pressureBatchSize = Math.max(
+  1,
+  Math.floor(Number.isFinite(configuredPressureBatchSize) ? configuredPressureBatchSize : 250)
+);
+const storageLowWatermark = boundedRatio(
+  process.env.PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT,
+  10
+);
+const storageHighWatermark = Math.max(
+  storageLowWatermark,
+  boundedRatio(process.env.PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT, 15)
+);
+const configuredDeleteConcurrency = Number(process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '64');
+const deleteConcurrency = Math.max(
+  1,
+  Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 64)
+);
 
 await mkdir(recordingsDir, { recursive: true, mode: 0o700 });
 
@@ -49,12 +76,13 @@ const streams = cameras.flatMap((camera) => [
 await Promise.all(
   streams.map(({ streamName }) => mkdir(path.join(recordingsDir, '.staging', streamName), { recursive: true, mode: 0o700 }))
 );
-const catalog = await openRecordingCatalog(dataRoot);
+const catalog = await openRecordingCatalog(dataRoot, { recoverCorrupt: true });
 let stopping = false;
 let shuttingDown = false;
 let retentionSweepInFlight = false;
+let storagePressureActive = false;
 
-const heartbeat = startProcessHeartbeats({
+const heartbeat = cleanupOnly ? null : startProcessHeartbeats({
   processId: 'patrol-recorder',
   label: 'Recording worker',
   kind: 'worker',
@@ -62,7 +90,7 @@ const heartbeat = startProcessHeartbeats({
 });
 
 let children = [];
-const retentionInterval = retentionEnabled
+const retentionInterval = retentionEnabled && !cleanupOnly
   ? setInterval(() => {
       void sweepRetentionIfIdle();
     }, retentionSweepMs)
@@ -81,6 +109,14 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 const catalogSync = await syncRecordingCatalogFromEvents(catalog, eventsDir);
 console.error(`recording catalog synchronized ${catalogSync.eventsApplied} event(s) from ${catalogSync.filesRead} file(s)`);
+if (cleanupOnly) {
+  try {
+    await sweepRetentionIfIdle({ forcePressure: true });
+  } finally {
+    catalog.close();
+  }
+  process.exit(0);
+}
 await recoverStagedSegments();
 children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
 
@@ -154,10 +190,11 @@ function startRecorder(camera, role, streamName) {
     lastCompletionAtMs = Date.now();
     const outputPattern = ffmpegRecordingPattern(recordingsDir, streamName, launchId);
     child = spawn('ffmpeg', [...baseArgs, outputPattern], {
-      stdio: ['ignore', 'pipe', 'inherit']
+      stdio: ['ignore', 'pipe', 'pipe']
     });
     console.error(`recording ${role} stream ${streamName} from ${streamUrl}`);
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const errorLines = forwardRateLimitedLines(child.stderr, `ffmpeg ${streamName}`);
     lines.on('line', (line) => {
       const completed = parseFfmpegCompletedSegment(line);
       if (!completed) {
@@ -174,6 +211,7 @@ function startRecorder(camera, role, streamName) {
 
     child.on('exit', (exitCode, signal) => {
       lines.close();
+      errorLines.close();
       child = null;
       if (stopping) {
         void finalizationQueue.finally(resolveStopped);
@@ -304,6 +342,18 @@ async function recoverStagedSegments() {
         console.error(`recovered staged recording ${segment.relativePath}`);
       } catch (error) {
         console.error(`could not recover staged recording ${streamName}/${entry.name}:`, error);
+        try {
+          const stagedPath = path.join(stagingDir, entry.name);
+          const stagedStats = await stat(stagedPath);
+          if (stagedStats.size <= 1024) {
+            await unlink(stagedPath);
+            console.error(`removed empty staged recording ${streamName}/${entry.name}`);
+          }
+        } catch (unlinkError) {
+          if (unlinkError?.code !== 'ENOENT') {
+            console.error(`could not remove unusable staged recording ${streamName}/${entry.name}:`, unlinkError);
+          }
+        }
       }
     }
   }
@@ -348,47 +398,189 @@ async function persistStagedSegment({ camera, role, streamName, stagingPath, pre
   return segment;
 }
 
-async function sweepRetentionIfIdle() {
+async function sweepRetentionIfIdle({ forcePressure = false } = {}) {
   if (!retentionEnabled || retentionSweepInFlight || stopping) {
     return;
   }
   retentionSweepInFlight = true;
   try {
     const nowMs = Date.now();
-    const expired = catalog.segmentsPastRetention(nowMs - mainRetentionMs, nowMs - subRetentionMs);
-    for (const segment of expired) {
-      if (stopping) {
-        return;
+    let ageExpired = 0;
+    let ageReclaimedBytes = 0;
+    while (!stopping) {
+      const expired = catalog.segmentsPastRetention(
+        nowMs - mainRetentionMs,
+        nowMs - subRetentionMs,
+        retentionBatchSize
+      );
+      if (expired.length === 0) {
+        break;
       }
-      const absolutePath = path.join(recordingsDir, segment.relativePath);
-      try {
-        await unlink(absolutePath);
-      } catch (error) {
-        if (error?.code !== 'ENOENT') {
-          throw error;
-        }
+      const expiredBatch = await expireSegments(expired, nowMs, 'age');
+      ageExpired += expiredBatch.count;
+      ageReclaimedBytes += expiredBatch.bytes;
+      console.error(
+        `recording age retention progress: ${ageExpired} segment(s), ` +
+        `${formatBytes(ageReclaimedBytes)} catalogued`
+      );
+      if (expiredBatch.count === 0) {
+        break;
       }
-      catalog.expireSegment(segment.relativePath, nowMs);
-      await appendCameraEvent({
-        type: 'recording.segment.expired',
-        source: 'patrol-recorder',
-        payload: {
-          cameraId: segment.cameraId,
-          role: segment.role,
-          streamName: segment.streamName,
-          startMs: segment.startMs,
-          relativePath: segment.relativePath,
-          retentionDays: segment.role === 'main'
-            ? Math.round(mainRetentionMs / (24 * 60 * 60 * 1000))
-            : Math.round(subRetentionMs / (24 * 60 * 60 * 1000))
-        }
-      });
+      if (cleanupOnly && (await recordingStorageUsage()).availableRatio >= storageHighWatermark) {
+        break;
+      }
+    }
+
+    let storage = await recordingStorageUsage();
+    if (
+      !storagePressureActive &&
+      (storage.availableRatio < storageLowWatermark || (forcePressure && storage.availableRatio < storageHighWatermark))
+    ) {
+      storagePressureActive = true;
+      console.error(
+        `recording storage pressure started at ${(storage.availableRatio * 100).toFixed(1)}% free; ` +
+        `target ${(storageHighWatermark * 100).toFixed(1)}%`
+      );
+    } else if (storagePressureActive && storage.availableRatio >= storageHighWatermark) {
+      storagePressureActive = false;
+      console.error(`recording storage pressure cleared at ${(storage.availableRatio * 100).toFixed(1)}% free`);
+    }
+
+    let totalReclaimedBytes = 0;
+    let totalExpired = 0;
+    while (storagePressureActive && storage.availableRatio < storageHighWatermark) {
+      const pressured = catalog.segmentsForStoragePressure(nowMs - mainRetentionMs, pressureBatchSize);
+      if (pressured.length === 0) {
+        console.error('recording storage pressure cannot reclaim more data without violating main-stream retention');
+        break;
+      }
+      const expiredBatch = await expireSegments(pressured, nowMs, 'storage-pressure');
+      totalExpired += expiredBatch.count;
+      totalReclaimedBytes += expiredBatch.bytes;
+      storage = await recordingStorageUsage();
+      console.error(
+        `recording storage pressure progress: ${totalExpired} segment(s), ` +
+        `${formatBytes(totalReclaimedBytes)} catalogued, ${(storage.availableRatio * 100).toFixed(1)}% free`
+      );
+      if (expiredBatch.count === 0 || stopping) {
+        break;
+      }
+    }
+    if (storagePressureActive && storage.availableRatio >= storageHighWatermark) {
+      storagePressureActive = false;
+      console.error(`recording storage pressure cleared at ${(storage.availableRatio * 100).toFixed(1)}% free`);
     }
   } catch (error) {
     console.error('recording retention sweep failed:', error);
   } finally {
     retentionSweepInFlight = false;
   }
+}
+
+async function expireSegments(segments, nowMs, reason) {
+  if (segments.length === 0) {
+    return { count: 0, bytes: 0 };
+  }
+  const deleted = [];
+  await mapWithConcurrency(segments, deleteConcurrency, async (segment) => {
+    try {
+      await unlink(path.join(recordingsDir, segment.relativePath));
+      deleted.push(segment);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        deleted.push(segment);
+      } else {
+        console.error(`could not expire recording ${segment.relativePath}:`, error);
+      }
+    }
+  });
+  if (deleted.length === 0) {
+    return { count: 0, bytes: 0 };
+  }
+  await appendCameraEvents(deleted.map((segment) => ({
+    type: 'recording.segment.expired',
+    source: 'patrol-recorder',
+    payload: {
+      cameraId: segment.cameraId,
+      role: segment.role,
+      streamName: segment.streamName,
+      startMs: segment.startMs,
+      relativePath: segment.relativePath,
+      retentionDays: segment.role === 'main'
+        ? Math.round(mainRetentionMs / (24 * 60 * 60 * 1000))
+        : Math.round(subRetentionMs / (24 * 60 * 60 * 1000)),
+      reason
+    }
+  })));
+  catalog.expireSegments(deleted.map((segment) => segment.relativePath), nowMs);
+  return {
+    count: deleted.length,
+    bytes: deleted.reduce((total, segment) => total + segment.sizeBytes, 0)
+  };
+}
+
+async function mapWithConcurrency(items, concurrency, operation) {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await operation(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function recordingStorageUsage() {
+  const storage = await statfs(recordingsDir);
+  const totalBytes = storage.blocks * storage.bsize;
+  const availableBytes = storage.bavail * storage.bsize;
+  return {
+    totalBytes,
+    availableBytes,
+    availableRatio: totalBytes > 0 ? availableBytes / totalBytes : 0
+  };
+}
+
+function boundedRatio(rawPercent, fallbackPercent) {
+  const parsed = Number(rawPercent ?? fallbackPercent);
+  const percent = Number.isFinite(parsed) ? parsed : fallbackPercent;
+  return Math.min(100, Math.max(0, percent)) / 100;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024 ** 3) {
+    return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  }
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+}
+
+function forwardRateLimitedLines(stream, label) {
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let emitted = 0;
+  let suppressed = 0;
+  let windowStartedAt = Date.now();
+  const flush = () => {
+    if (suppressed > 0) {
+      console.error(`${label}: suppressed ${suppressed} repeated diagnostic line(s)`);
+    }
+    emitted = 0;
+    suppressed = 0;
+    windowStartedAt = Date.now();
+  };
+  lines.on('line', (line) => {
+    if (Date.now() - windowStartedAt >= 60_000) {
+      flush();
+    }
+    if (emitted < 10) {
+      console.error(`${label}: ${line}`);
+      emitted += 1;
+    } else {
+      suppressed += 1;
+    }
+  });
+  lines.on('close', flush);
+  return lines;
 }
 
 async function configuredCameras() {

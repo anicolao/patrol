@@ -12,6 +12,10 @@ export async function appendCameraEvent(event) {
   return await appendEvent('cameras', event);
 }
 
+export async function appendCameraEvents(events) {
+  return await appendEvents('cameras', events);
+}
+
 export async function appendSystemEvent(event) {
   return await appendEvent('system', event);
 }
@@ -32,16 +36,29 @@ export async function appendProcessHeartbeat(input) {
   });
 }
 
-export function startProcessHeartbeats(input) {
+export function startProcessHeartbeats(input, options = {}) {
   const intervalMs = input.intervalMs ?? Number(process.env.PATROL_PROCESS_HEARTBEAT_MS ?? '30000');
-  void appendProcessHeartbeat(input).catch((error) => {
-    console.error(`failed to append ${input.processId} heartbeat:`, error);
-  });
+  const appendHeartbeat = options.appendHeartbeat ?? appendProcessHeartbeat;
+  let appendInFlight = false;
+
+  const appendIfIdle = async () => {
+    if (appendInFlight) {
+      return;
+    }
+    appendInFlight = true;
+    try {
+      await appendHeartbeat(input);
+    } catch (error) {
+      console.error(`failed to append ${input.processId} heartbeat:`, error);
+    } finally {
+      appendInFlight = false;
+    }
+  };
+
+  void appendIfIdle();
 
   const interval = setInterval(() => {
-    void appendProcessHeartbeat(input).catch((error) => {
-      console.error(`failed to append ${input.processId} heartbeat:`, error);
-    });
+    void appendIfIdle();
   }, intervalMs);
 
   return interval;
@@ -70,19 +87,35 @@ function resolveGitRevision() {
 }
 
 async function appendEvent(stream, event) {
+  const [storedEvent] = await appendEvents(stream, [event]);
+  return storedEvent;
+}
+
+async function appendEvents(stream, events) {
+  if (events.length === 0) {
+    return [];
+  }
   await mkdir(eventsDir, { recursive: true, mode: 0o700 });
-  const storedEvent = {
+  const nowMs = Date.now();
+  const storedEvents = events.map((event) => ({
     id: randomUUID(),
-    ts_ms: Date.now(),
+    ts_ms: nowMs,
     schema: 1,
     ...event
-  };
-  const day = new Date(storedEvent.ts_ms).toISOString().slice(0, 10);
-  const filePath = path.join(eventsDir, `${stream}-${day}.jsonl`);
-  await writeFile(filePath, `${JSON.stringify(storedEvent)}\n`, {
-    encoding: 'utf8',
-    flag: 'a',
-    mode: 0o600
-  });
-  return storedEvent;
+  }));
+  const eventsByDay = Map.groupBy(
+    storedEvents,
+    (event) => new Date(event.ts_ms).toISOString().slice(0, 10)
+  );
+  await Promise.all(
+    Array.from(eventsByDay, async ([day, dayEvents]) => {
+      const filePath = path.join(eventsDir, `${stream}-${day}.jsonl`);
+      await writeFile(filePath, `${dayEvents.map((event) => JSON.stringify(event)).join('\n')}\n`, {
+        encoding: 'utf8',
+        flag: 'a',
+        mode: 0o600
+      });
+    })
+  );
+  return storedEvents;
 }
