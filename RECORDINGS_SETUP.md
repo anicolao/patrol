@@ -96,6 +96,7 @@ PATROL_RECORDING_STALL_TIMEOUT_MS=90000
 PATROL_MAIN_RECORDING_RETENTION_DAYS=7
 PATROL_SUB_RECORDING_RETENTION_DAYS=30
 PATROL_RECORDING_RETENTION_ENABLED=true
+PATROL_RECORDING_AGE_RETENTION_ENABLED=true
 PATROL_RECORDING_RECOVERY_ENABLED=true
 PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10
 PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15
@@ -123,6 +124,10 @@ planned offline maintenance window.
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
 without deleting expired recordings. This is useful while validating a new
 deployment or before an operator has approved retention cleanup.
+
+Set `PATROL_RECORDING_AGE_RETENTION_ENABLED=false` on I/O-constrained volumes
+to skip routine age deletion. Storage-pressure cleanup remains active; it pauses
+the writers before deletion and resumes them after reaching the high watermark.
 
 ## Backfill And Migrate Existing Recordings
 

@@ -13,6 +13,7 @@ const runAsUser = process.env.PATROL_RECORDER_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const retentionEnabled = process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true';
+const ageRetentionEnabled = process.env.PATROL_RECORDING_AGE_RETENTION_ENABLED ?? 'true';
 const recoveryEnabled = process.env.PATROL_RECORDING_RECOVERY_ENABLED ?? 'true';
 const segmentSeconds = process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '60';
 const deleteConcurrency = process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '1';
@@ -117,6 +118,7 @@ function renderLaunchAgent() {
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
     `PATROL_RECORDING_RETENTION_ENABLED=${retentionEnabled}`,
+    `PATROL_RECORDING_AGE_RETENTION_ENABLED=${ageRetentionEnabled}`,
     `PATROL_RECORDING_RECOVERY_ENABLED=${recoveryEnabled}`,
     `PATROL_RECORDING_SEGMENT_SECONDS=${segmentSeconds}`,
     `PATROL_RECORDING_DELETE_CONCURRENCY=${deleteConcurrency}`,
