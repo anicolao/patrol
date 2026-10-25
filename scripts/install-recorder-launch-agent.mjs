@@ -13,6 +13,11 @@ const runAsUser = process.env.PATROL_RECORDER_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const retentionEnabled = process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true';
+const deleteConcurrency = process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '64';
+const mainRetentionDays = process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS ?? '7';
+const subRetentionDays = process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ?? '30';
+const storageLowWatermark = process.env.PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT ?? '10';
+const storageHighWatermark = process.env.PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT ?? '15';
 const nixPath = process.env.PATROL_NIX_BIN ?? findExecutable('nix');
 const label = 'com.patrol.recorder';
 const domain = `gui/${process.getuid()}`;
@@ -109,6 +114,12 @@ function renderLaunchAgent() {
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
     `PATROL_RECORDING_RETENTION_ENABLED=${retentionEnabled}`,
+    `PATROL_RECORDING_DELETE_CONCURRENCY=${deleteConcurrency}`,
+    `PATROL_MAIN_RECORDING_RETENTION_DAYS=${mainRetentionDays}`,
+    `PATROL_SUB_RECORDING_RETENTION_DAYS=${subRetentionDays}`,
+    `PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=${storageLowWatermark}`,
+    `PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=${storageHighWatermark}`,
+    `UV_THREADPOOL_SIZE=${deleteConcurrency}`,
     nixPath,
     'develop',
     '--command',

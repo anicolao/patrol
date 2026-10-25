@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
-import { access, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   appendCameraEvent,
@@ -150,11 +150,11 @@ async function analyzePersonAlert(event, segments, mainStreamNames) {
   const sampleId = `${event.id}-person`;
   const segment = preferredMainSegment(segments, event.payload.cameraId, occurredAtMs);
   const mainStreamName = mainStreamNames.get(event.payload.cameraId) ?? null;
+  const safeSampleId = safeFileName(sampleId);
+  const framePath = path.join(framesDir, `${safeSampleId}.jpg`);
+  const previousFramePath = path.join(framesDir, `${safeSampleId}-previous.jpg`);
 
   try {
-    const safeSampleId = safeFileName(sampleId);
-    const framePath = path.join(framesDir, `${safeSampleId}.jpg`);
-    const previousFramePath = path.join(framesDir, `${safeSampleId}-previous.jpg`);
     const cropRelativePath = `${safeSampleId}.jpg`;
     const cropPath = path.join(cropsDir, cropRelativePath);
     const cropBox = targetCropBox(event.payload.rawXml);
@@ -208,6 +208,18 @@ async function analyzePersonAlert(event, segments, mainStreamNames) {
     });
   } catch (error) {
     await appendRecognitionFailure(event, sampleId, occurredAtMs, error instanceof Error ? error.message : String(error));
+  } finally {
+    await Promise.all([removeTemporaryFrame(framePath), removeTemporaryFrame(previousFramePath)]);
+  }
+}
+
+async function removeTemporaryFrame(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error(`could not remove temporary recognition frame ${filePath}:`, error);
+    }
   }
 }
 

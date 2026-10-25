@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
@@ -104,7 +104,8 @@ export class RecordingCatalog {
         end_ms = excluded.end_ms,
         duration_ms = excluded.duration_ms,
         size_bytes = excluded.size_bytes,
-        observed_at_ms = MAX(recording_segments.observed_at_ms, excluded.observed_at_ms)
+        observed_at_ms = MAX(recording_segments.observed_at_ms, excluded.observed_at_ms),
+        expired_at_ms = NULL
     `).run(
       segment.relativePath,
       segment.cameraId,
@@ -145,6 +146,25 @@ export class RecordingCatalog {
     this.#database
       .prepare('UPDATE recording_segments SET expired_at_ms = ? WHERE relative_path = ?')
       .run(expiredAtMs, relativePath);
+  }
+
+  expireSegments(relativePaths: string[], expiredAtMs = Date.now()) {
+    if (relativePaths.length === 0) {
+      return;
+    }
+    const statement = this.#database.prepare(
+      'UPDATE recording_segments SET expired_at_ms = ? WHERE relative_path = ?'
+    );
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      for (const relativePath of relativePaths) {
+        statement.run(expiredAtMs, relativePath);
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   segmentsForWindow(streamNames: string[], startMs: number, endMs: number): RecordingSegment[] {
@@ -195,7 +215,7 @@ export class RecordingCatalog {
   summary() {
     const row = this.#database.prepare(`
       SELECT COUNT(*) AS total_segments,
-             SUM(CASE WHEN expired_at_ms IS NULL THEN 1 ELSE 0 END) AS active_segments,
+             COALESCE(SUM(CASE WHEN expired_at_ms IS NULL THEN 1 ELSE 0 END), 0) AS active_segments,
              MIN(CASE WHEN expired_at_ms IS NULL THEN start_ms END) AS available_start_ms,
              MAX(CASE WHEN expired_at_ms IS NULL THEN end_ms END) AS available_end_ms
       FROM recording_segments
@@ -208,15 +228,37 @@ export class RecordingCatalog {
     return { ...row };
   }
 
-  segmentsPastRetention(mainBeforeMs: number, subBeforeMs: number): RecordingSegment[] {
+  segmentsPastRetention(
+    mainBeforeMs: number,
+    subBeforeMs: number,
+    limit = 1_000
+  ): RecordingSegment[] {
+    const boundedLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 1_000));
     const rows = this.#database.prepare(`
       SELECT camera_id, role, stream_name, start_ms, end_ms, duration_ms,
              size_bytes, relative_path, observed_at_ms
       FROM recording_segments
       WHERE expired_at_ms IS NULL
         AND ((role = 'main' AND start_ms < ?) OR (role = 'sub' AND start_ms < ?))
-      ORDER BY start_ms ASC, relative_path ASC
-    `).all(mainBeforeMs, subBeforeMs) as unknown as CatalogRow[];
+      ORDER BY size_bytes DESC, start_ms ASC, relative_path ASC
+      LIMIT ?
+    `).all(mainBeforeMs, subBeforeMs, boundedLimit) as unknown as CatalogRow[];
+    return rows.map(segmentFromRow);
+  }
+
+  segmentsForStoragePressure(mainProtectedAfterMs: number, limit = 1_000): RecordingSegment[] {
+    const boundedLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 1_000));
+    const rows = this.#database.prepare(`
+      SELECT camera_id, role, stream_name, start_ms, end_ms, duration_ms,
+             size_bytes, relative_path, observed_at_ms
+      FROM recording_segments
+      WHERE expired_at_ms IS NULL
+        AND (role = 'sub' OR (role = 'main' AND start_ms < ?))
+      ORDER BY CASE role WHEN 'sub' THEN 0 ELSE 1 END,
+               start_ms ASC,
+               relative_path ASC
+      LIMIT ?
+    `).all(mainProtectedAfterMs, boundedLimit) as unknown as CatalogRow[];
     return rows.map(segmentFromRow);
   }
 
@@ -372,11 +414,42 @@ export class RecordingCatalog {
   }
 }
 
-export async function openRecordingCatalog(dataRoot: string) {
+export async function openRecordingCatalog(
+  dataRoot: string,
+  options: { recoverCorrupt?: boolean } = {}
+) {
   const cacheDir = path.join(dataRoot, 'cache');
   await mkdir(cacheDir, { recursive: true, mode: 0o700 });
-  const database = new DatabaseSync(path.join(cacheDir, CATALOG_FILE_NAME));
-  database.exec(`
+  const catalogPath = path.join(cacheDir, CATALOG_FILE_NAME);
+  let database: DatabaseSync | null = null;
+  try {
+    database = initializeCatalogDatabase(catalogPath);
+    if (options.recoverCorrupt) {
+      assertCatalogIntegrity(database);
+    }
+  } catch (error) {
+    try {
+      database?.close();
+    } catch {
+      // The corrupt handle is being discarded regardless.
+    }
+    if (!options.recoverCorrupt || !isCatalogCorruption(error)) {
+      throw error;
+    }
+    const quarantineDir = await quarantineCorruptCatalog(cacheDir);
+    console.error(`quarantined corrupt recording catalog at ${quarantineDir}`);
+    database = initializeCatalogDatabase(catalogPath);
+  }
+  if (!database) {
+    throw new Error('Recording catalog did not initialize.');
+  }
+  return new RecordingCatalog(database);
+}
+
+function initializeCatalogDatabase(catalogPath: string) {
+  const database = new DatabaseSync(catalogPath);
+  try {
+    database.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA busy_timeout = 5000;
@@ -414,7 +487,47 @@ export async function openRecordingCatalog(dataRoot: string) {
       value TEXT NOT NULL
     );
   `);
-  return new RecordingCatalog(database);
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
+function assertCatalogIntegrity(database: DatabaseSync) {
+  const rows = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check: string }>;
+  if (rows.length !== 1 || rows[0]?.quick_check !== 'ok') {
+    throw new Error(`recording catalog integrity check failed: ${rows.map((row) => row.quick_check).join('; ')}`);
+  }
+}
+
+function isCatalogCorruption(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const sqliteError = error as Error & { errcode?: number };
+  return (
+    sqliteError.errcode === 11 ||
+    sqliteError.errcode === 26 ||
+    /database disk image is malformed|file is not a database|integrity check failed/i.test(error.message)
+  );
+}
+
+async function quarantineCorruptCatalog(cacheDir: string) {
+  const stamp = new Date().toISOString().replace(/[-:.]/g, '');
+  const quarantineDir = path.join(cacheDir, `corrupt-recording-catalog-${stamp}-${process.pid}`);
+  await mkdir(quarantineDir, { recursive: false, mode: 0o700 });
+  for (const suffix of ['', '-wal', '-shm']) {
+    const source = path.join(cacheDir, `${CATALOG_FILE_NAME}${suffix}`);
+    try {
+      await rename(source, path.join(quarantineDir, `${CATALOG_FILE_NAME}${suffix}`));
+    } catch (error) {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+        throw error;
+      }
+    }
+  }
+  return quarantineDir;
 }
 
 export async function syncRecordingCatalogFromEvents(catalog: RecordingCatalog, eventsDir: string) {

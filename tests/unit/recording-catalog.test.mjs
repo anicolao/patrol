@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -40,6 +40,18 @@ test('catalog queries windows, bounds, expiration, and incremental event sync', 
     assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 200_000, 10), [
       { relativePath: 'main/100.mp4', startMs: 100_000 }
     ]);
+    assert.deepEqual(
+      catalog.segmentsForStoragePressure(105_000, 10).map(({ relativePath }) => relativePath),
+      ['sub/110.mp4', 'main/100.mp4']
+    );
+    assert.deepEqual(
+      catalog.segmentsForStoragePressure(100_000, 10).map(({ relativePath }) => relativePath),
+      ['sub/110.mp4']
+    );
+    catalog.expireSegments(['main/100.mp4', 'sub/110.mp4'], 210_000);
+    assert.deepEqual(catalog.segmentsForWindow(['camera_main', 'camera_sub'], 0, 200_000), []);
+    catalog.upsertSegment({ ...first.payload, observedAtMs: 215_000 });
+    catalog.upsertSegment({ ...second.payload, observedAtMs: 215_000 });
     catalog.markThumbnailFailed('main/100.mp4', 'not ready', 300_000);
     assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 250_000, 10), []);
     assert.deepEqual(catalog.segmentsNeedingThumbnails(0, 300_000, 10), [
@@ -68,6 +80,20 @@ test('catalog queries windows, bounds, expiration, and incremental event sync', 
       }
     ]);
     catalog.deleteThumbnail('main/100.mp4');
+    catalog.upsertSegment({
+      cameraId: 'camera-1',
+      role: 'main',
+      streamName: 'camera_main',
+      startMs: 100_000,
+      durationMs: 15_000,
+      sizeBytes: 1024,
+      relativePath: 'main/100.mp4',
+      observedAtMs: 220_000
+    });
+    assert.deepEqual(
+      catalog.segmentsForWindow(['camera_main'], 0, 200_000).map(({ relativePath }) => relativePath),
+      ['main/100.mp4']
+    );
     assert.deepEqual(await syncRecordingCatalogFromEvents(catalog, eventsDir), {
       filesRead: 0,
       eventsApplied: 0
@@ -119,6 +145,33 @@ test('catalog relocates legacy segments and preserves thumbnail tracking', async
     assert.deepEqual(catalog.thumbnailSummary(), { tracked: 1, generated: 1, failed: 0 });
   } finally {
     catalog.close();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('recorder catalog open quarantines a corrupt cache for event-log rebuild', async () => {
+  const dataRoot = await mkdtemp(path.join(tmpdir(), 'patrol-catalog-corrupt-'));
+  try {
+    const cacheDir = path.join(dataRoot, 'cache');
+    await mkdir(cacheDir);
+    await writeFile(path.join(cacheDir, 'recording-catalog.sqlite'), 'not a sqlite database');
+
+    const catalog = await openRecordingCatalog(dataRoot, { recoverCorrupt: true });
+    assert.deepEqual(catalog.summary(), {
+      total_segments: 0,
+      active_segments: 0,
+      available_start_ms: null,
+      available_end_ms: null
+    });
+    catalog.close();
+
+    const quarantineName = (await readdir(cacheDir)).find((name) => name.startsWith('corrupt-recording-catalog-'));
+    assert.ok(quarantineName);
+    assert.equal(
+      await readFile(path.join(cacheDir, quarantineName, 'recording-catalog.sqlite'), 'utf8'),
+      'not a sqlite database'
+    );
+  } finally {
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
