@@ -28,6 +28,7 @@ Prerequisites:
   `https://github.com/anicolao/patrol.git` so deployment does not depend on a
   GitHub SSH key for `security`.
 - `/Volumes/NVR` is mounted and `/Volumes/NVR/recordings` is writable by `security`.
+- The NVR APFS volume UUID is `995E4E1D-1663-45E2-82D7-FD40C8A360ED`.
 - `/Users/security/Library/PatrolData/watchdog.env` exists and is readable only by `security`.
 
 ## Release through GitHub
@@ -155,6 +156,18 @@ LaunchAgent also sends a hangup to its process in the protected `security`
 account; this prevents old processes from retaining service ports after a
 restart.
 
+Install the one-shot volume mount job first. It retries once per minute after a
+failed attempt and stops after the NVR volume mounts successfully:
+
+```sh
+ssh emrys@emryss-mac-mini '
+  env \
+    PATROL_RECORDING_VOLUME_UUID=995E4E1D-1663-45E2-82D7-FD40C8A360ED \
+    /bin/zsh -lc "cd /Users/emrys/projects/patrol-launchers && \
+      exec /run/current-system/sw/bin/nix develop --command patrol-recording-volume-launch-agent-install"
+'
+```
+
 Install the shared services first:
 
 ```sh
@@ -251,7 +264,7 @@ ssh security@emryss-mac-mini '
 '
 
 ssh emrys@emryss-mac-mini '
-  for name in go2rtc events-ws web state-checkpoint annke-events person-recognizer thumbnailer recorder watchdog; do
+  for name in recording-volume go2rtc events-ws web state-checkpoint annke-events person-recognizer thumbnailer recorder watchdog; do
     echo "=== $name"
     launchctl print gui/501/com.patrol.$name 2>/dev/null | \
       grep -E "state =|last exit code" | head -2
@@ -259,8 +272,9 @@ ssh emrys@emryss-mac-mini '
 '
 ```
 
-The watchdog is a one-shot job, so `state = not running` with `last exit code = 0`
-is healthy. Persistent services must report `state = running`.
+The recording-volume and watchdog jobs are one-shot jobs, so
+`state = not running` with `last exit code = 0` is healthy. Persistent services
+must report `state = running`.
 
 On startup the recorder refuses to create or use a path below `/Volumes` unless
 that volume is actually mounted. Launchd retries it after the NVR volume
