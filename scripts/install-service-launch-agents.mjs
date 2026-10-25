@@ -51,6 +51,7 @@ const runAsUser = process.env.PATROL_SERVICES_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const thumbnailDir = process.env.PATROL_THUMBNAIL_DIR ?? null;
+const thumbnailWorkDelayMs = process.env.PATROL_THUMBNAILER_WORK_DELAY_MS ?? '8000';
 const nixPath = process.env.PATROL_NIX_BIN ?? findExecutable('nix');
 const domain = `gui/${process.getuid()}`;
 const launchAgentDir = path.join(homedir(), 'Library', 'LaunchAgents');
@@ -91,16 +92,15 @@ async function installService(service) {
   await writeFile(launchAgentPath, renderLaunchAgent(service, logFile), { encoding: 'utf8', mode: 0o644 });
 
   spawnSync('launchctl', ['bootout', `${domain}/${service.label}`], { encoding: 'utf8' });
+  const enable = spawnSync('launchctl', ['enable', `${domain}/${service.label}`], { encoding: 'utf8' });
+  if (enable.status !== 0) {
+    throw new Error(`${service.id} launchctl enable failed: ${enable.stderr.trim() || `exit ${enable.status}`}`);
+  }
   const bootstrap = spawnSync('launchctl', ['bootstrap', domain, launchAgentPath], { encoding: 'utf8' });
   if (bootstrap.status !== 0) {
     throw new Error(
       `${service.id} launchctl bootstrap failed: ${bootstrap.stderr.trim() || `exit ${bootstrap.status}`}`
     );
-  }
-
-  const enable = spawnSync('launchctl', ['enable', `${domain}/${service.label}`], { encoding: 'utf8' });
-  if (enable.status !== 0) {
-    throw new Error(`${service.id} launchctl enable failed: ${enable.stderr.trim() || `exit ${enable.status}`}`);
   }
 
   const kickstart = spawnSync('launchctl', ['kickstart', `${domain}/${service.label}`], { encoding: 'utf8' });
@@ -176,6 +176,7 @@ function renderLaunchAgent(service, logFile) {
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
     ...(thumbnailDir ? [`PATROL_THUMBNAIL_DIR=${thumbnailDir}`] : []),
+    ...(service.id === 'thumbnailer' ? [`PATROL_THUMBNAILER_WORK_DELAY_MS=${thumbnailWorkDelayMs}`] : []),
     nixPath,
     'develop',
     '--command',

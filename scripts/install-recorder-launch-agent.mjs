@@ -13,6 +13,7 @@ const runAsUser = process.env.PATROL_RECORDER_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const retentionEnabled = process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true';
+const recoveryEnabled = process.env.PATROL_RECORDING_RECOVERY_ENABLED ?? 'true';
 const segmentSeconds = process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '60';
 const deleteConcurrency = process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '1';
 const deleteDelayMs = process.env.PATROL_RECORDING_DELETE_DELAY_MS ?? '3000';
@@ -40,14 +41,13 @@ await mkdir(logDir, { recursive: true, mode: 0o700 });
 await writeFile(launchAgentPath, renderLaunchAgent(), { encoding: 'utf8', mode: 0o644 });
 
 spawnSync('launchctl', ['bootout', `${domain}/${label}`], { encoding: 'utf8' });
-const bootstrap = spawnSync('launchctl', ['bootstrap', domain, launchAgentPath], { encoding: 'utf8' });
-if (bootstrap.status !== 0) {
-  throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim() || `exit ${bootstrap.status}`}`);
-}
-
 const enable = spawnSync('launchctl', ['enable', `${domain}/${label}`], { encoding: 'utf8' });
 if (enable.status !== 0) {
   throw new Error(`launchctl enable failed: ${enable.stderr.trim() || `exit ${enable.status}`}`);
+}
+const bootstrap = spawnSync('launchctl', ['bootstrap', domain, launchAgentPath], { encoding: 'utf8' });
+if (bootstrap.status !== 0) {
+  throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim() || `exit ${bootstrap.status}`}`);
 }
 
 const kickstart = spawnSync('launchctl', ['kickstart', '-k', `${domain}/${label}`], { encoding: 'utf8' });
@@ -117,6 +117,7 @@ function renderLaunchAgent() {
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
     `PATROL_RECORDING_RETENTION_ENABLED=${retentionEnabled}`,
+    `PATROL_RECORDING_RECOVERY_ENABLED=${recoveryEnabled}`,
     `PATROL_RECORDING_SEGMENT_SECONDS=${segmentSeconds}`,
     `PATROL_RECORDING_DELETE_CONCURRENCY=${deleteConcurrency}`,
     `PATROL_RECORDING_DELETE_DELAY_MS=${deleteDelayMs}`,

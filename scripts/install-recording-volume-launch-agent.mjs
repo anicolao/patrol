@@ -26,13 +26,13 @@ await mkdir(logDir, { recursive: true, mode: 0o700 });
 await writeFile(launchAgentPath, renderLaunchAgent(), { encoding: 'utf8', mode: 0o644 });
 
 spawnSync('launchctl', ['bootout', `${domain}/${label}`], { encoding: 'utf8' });
-const bootstrap = spawnSync('launchctl', ['bootstrap', domain, launchAgentPath], { encoding: 'utf8' });
-if (bootstrap.status !== 0) {
-  throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim() || `exit ${bootstrap.status}`}`);
-}
 const enable = spawnSync('launchctl', ['enable', `${domain}/${label}`], { encoding: 'utf8' });
 if (enable.status !== 0) {
   throw new Error(`launchctl enable failed: ${enable.stderr.trim() || `exit ${enable.status}`}`);
+}
+const bootstrap = spawnSync('launchctl', ['bootstrap', domain, launchAgentPath], { encoding: 'utf8' });
+if (bootstrap.status !== 0) {
+  throw new Error(`launchctl bootstrap failed: ${bootstrap.stderr.trim() || `exit ${bootstrap.status}`}`);
 }
 const kickstart = spawnSync('launchctl', ['kickstart', `${domain}/${label}`], { encoding: 'utf8' });
 if (kickstart.status !== 0) {
