@@ -156,8 +156,8 @@ LaunchAgent also sends a hangup to its process in the protected `security`
 account; this prevents old processes from retaining service ports after a
 restart.
 
-Install the one-shot volume mount job first. It retries once per minute after a
-failed attempt and stops after the NVR volume mounts successfully:
+Install the volume mount job first. It runs eagerly at login and once per
+minute thereafter, doing nothing when NVR is already mounted:
 
 ```sh
 ssh emrys@emryss-mac-mini '
@@ -272,9 +272,9 @@ ssh emrys@emryss-mac-mini '
 '
 ```
 
-The recording-volume and watchdog jobs are one-shot jobs, so
-`state = not running` with `last exit code = 0` is healthy. Persistent services
-must report `state = running`.
+The recording-volume and watchdog jobs are periodic jobs, so `state = not
+running` with `last exit code = 0` is healthy. Persistent services must report
+`state = running`.
 
 On startup the recorder refuses to create or use a path below `/Volumes` unless
 that volume is actually mounted. Launchd retries it after the NVR volume

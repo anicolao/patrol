@@ -62,21 +62,18 @@ function renderLaunchAgent() {
   <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/sbin/diskutil</string>
-    <string>mount</string>
-    <string>${volumeUuid}</string>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>/usr/sbin/diskutil info ${volumeUuid} | /usr/bin/grep -q 'Mounted: *Yes' || exec /usr/sbin/diskutil mount ${volumeUuid}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
   <key>ThrottleInterval</key>
   <integer>60</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Interactive</string>
   <key>StandardOutPath</key>
   <string>${logFile}</string>
   <key>StandardErrorPath</key>
