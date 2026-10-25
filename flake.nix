@@ -139,6 +139,13 @@
               node scripts/install-service-launch-agents.mjs
             '';
           };
+          patrol-recording-volume-launch-agent-install = pkgs.writeShellApplication {
+            name = "patrol-recording-volume-launch-agent-install";
+            runtimeInputs = [ pkgs.nodejs_24 ];
+            text = ''
+              node scripts/install-recording-volume-launch-agent.mjs
+            '';
+          };
           patrol-person-recognizer = pkgs.writeShellApplication {
             name = "patrol-person-recognizer";
             runtimeInputs = [
@@ -219,6 +226,7 @@
               patrol-person-recognizer
               patrol-recording-catalog-sync
               patrol-recording-backfill
+              patrol-recording-volume-launch-agent-install
               patrol-recorder
               patrol-recorder-launch-agent-install
               patrol-service-launch-agents-install
