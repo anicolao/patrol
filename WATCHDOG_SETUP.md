@@ -79,8 +79,8 @@ that user's GUI launchd domain:
 
 ```sh
 PATROL_WATCHDOG_REPO_ROOT=/Users/security/projects/patrol \
-PATROL_DATA_DIR=/Volumes/NVR/patrol \
-PATROL_WATCHDOG_ENV_FILE=/Volumes/NVR/patrol/watchdog.env \
+PATROL_DATA_DIR=/Users/security/Library/PatrolData \
+PATROL_WATCHDOG_ENV_FILE=/Users/security/Library/PatrolData/watchdog.env \
 PATROL_WATCHDOG_RUN_AS_USER=security \
 nix develop --command patrol-watchdog-launch-agent-install
 ```
@@ -96,6 +96,9 @@ The installer fails if the GUI launchd domain, environment file access, agent
 bootstrap, kickstart, or post-install verification fails. It does not fall back
 to a detached process that would disappear on reboot. LaunchAgent output is
 written to `~/Library/Logs/Patrol/watchdog.log` for the auto-login user.
+
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the complete Git release workflow and
+the exact production installer invocation.
 
 ## Manual Test
 

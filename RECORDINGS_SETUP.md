@@ -90,11 +90,14 @@ PATROL_RECORDING_SEGMENT_SECONDS=15
 PATROL_RECORDING_RESTART_DELAY_MS=250
 PATROL_RECORDING_RESTART_MAX_DELAY_MS=5000
 PATROL_RECORDING_SEGMENT_SETTLE_MS=250
-PATROL_RECORDING_FINALIZE_TIMEOUT_MS=10000
+PATROL_RECORDING_FINALIZE_TIMEOUT_MS=120000
 PATROL_RECORDING_STALL_TIMEOUT_MS=90000
 PATROL_MAIN_RECORDING_RETENTION_DAYS=7
 PATROL_SUB_RECORDING_RETENTION_DAYS=30
 PATROL_RECORDING_RETENTION_ENABLED=true
+PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10
+PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15
+PATROL_RECORDING_DELETE_CONCURRENCY=64
 ```
 
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
@@ -123,11 +126,11 @@ nix develop --command patrol-recording-backfill
 4. Set `PATROL_RECORDING_BACKFILL_MIGRATE=false` to repair the legacy flat
 catalog without moving files.
 
-On the Mac mini deployment, use a data root for event logs and secrets and a
-separate recordings root on the NVR volume:
+On the Mac mini deployment, event logs, secrets, and caches stay on the internal
+disk. Only recordings use the quota-limited NVR volume:
 
 ```sh
-PATROL_DATA_DIR=/Volumes/NVR/patrol
+PATROL_DATA_DIR=/Users/security/Library/PatrolData
 PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings
 ```
 
@@ -140,7 +143,7 @@ clips:
 
 ```sh
 PATROL_RECORDER_REPO_ROOT=/Users/security/projects/patrol \
-PATROL_DATA_DIR=/Volumes/NVR/patrol \
+PATROL_DATA_DIR=/Users/security/Library/PatrolData \
 PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
 PATROL_RECORDING_RETENTION_ENABLED=false \
 PATROL_RECORDER_RUN_AS_USER=security \
@@ -152,3 +155,7 @@ Run the installer from the auto-login user's checkout. When
 non-interactive SSH to that account on `localhost`. The agent stays loaded and
 restarts the recorder whenever its SSH-backed recorder process exits. Output is
 written to `~/Library/Logs/Patrol/recorder.log` for the auto-login user.
+
+Production deployments enable retention and set the 10%/15% storage-pressure
+watermarks. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the reviewed Git workflow,
+the exact LaunchAgent command, verification, and rollback.
