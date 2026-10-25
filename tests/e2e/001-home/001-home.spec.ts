@@ -81,6 +81,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   tester.setMetadata('Patrol Camera View', 'The SvelteKit frontend serves tabbed camera operations.');
 
   await page.clock.install({ time: fixedNowMs });
+  await page.clock.setFixedTime(fixedNowMs);
   await page.addInitScript((eventTsMs) => {
     class PatrolWebSocketMock extends EventTarget {
       static CONNECTING = 0;
@@ -667,6 +668,7 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
     ]
   });
 
+  await page.clock.setFixedTime(fixedNowMs + 60 * 1000);
   await page.clock.fastForward(60 * 1000);
   await page.getByRole('link', { name: 'Back to cameras' }).click();
   await page.getByTestId('tab-settings').click();
@@ -854,6 +856,7 @@ test('cached snapshot boots quickly and reconciles server state', async ({ page 
   let stateRequests = 0;
 
   await page.clock.install({ time: fixedNowMs });
+  await page.clock.setFixedTime(fixedNowMs);
   await seedCachedCameraState(page, cachedSnapshot, fixedNowMs - 50);
   await page.addInitScript((eventTsMs) => {
     class PatrolWebSocketMock extends EventTarget {
