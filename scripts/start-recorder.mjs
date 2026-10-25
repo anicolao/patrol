@@ -374,6 +374,9 @@ async function recoverStagedSegments(stagedSegments) {
         }
       }
     }
+    if (deleteDelayMs > 0 && !stopping) {
+      await delay(deleteDelayMs);
+    }
   }
 }
 

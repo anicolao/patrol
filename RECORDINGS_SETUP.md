@@ -108,7 +108,8 @@ leaves workers available to finalize new segments while retention cleanup is
 removing old files. High or unpaced deletion concurrency can saturate metadata
 I/O on the USB APFS volume and stall active recordings. Sixty-second segments
 reduce steady-state file creation and deletion to one quarter of the previous
-15-second rate.
+15-second rate. The same delay is applied while recovering staged segments so
+post-crash cleanup cannot monopolize the volume.
 
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
 without deleting expired recordings. This is useful while validating a new
