@@ -60,12 +60,13 @@ const storageHighWatermark = Math.max(
   storageLowWatermark,
   boundedRatio(process.env.PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT, 15)
 );
-const configuredDeleteConcurrency = Number(process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '64');
+const configuredDeleteConcurrency = Number(process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '2');
 const deleteConcurrency = Math.max(
   1,
-  Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 64)
+  Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 2)
 );
 
+await assertExternalRecordingVolumeMounted(recordingsDir);
 await mkdir(recordingsDir, { recursive: true, mode: 0o700 });
 
 const cameras = await configuredCameras();
@@ -546,6 +547,29 @@ function boundedRatio(rawPercent, fallbackPercent) {
   const parsed = Number(rawPercent ?? fallbackPercent);
   const percent = Number.isFinite(parsed) ? parsed : fallbackPercent;
   return Math.min(100, Math.max(0, percent)) / 100;
+}
+
+async function assertExternalRecordingVolumeMounted(targetDir) {
+  const volumesRoot = path.resolve('/Volumes');
+  const relativePath = path.relative(volumesRoot, path.resolve(targetDir));
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return;
+  }
+  const [volumeName] = relativePath.split(path.sep);
+  if (!volumeName) {
+    throw new Error(`recordings directory must name a mounted volume below ${volumesRoot}: ${targetDir}`);
+  }
+  const volumeRoot = path.join(volumesRoot, volumeName);
+  let volumesStats;
+  let volumeStats;
+  try {
+    [volumesStats, volumeStats] = await Promise.all([stat(volumesRoot), stat(volumeRoot)]);
+  } catch (error) {
+    throw new Error(`recording volume is not mounted at ${volumeRoot}`, { cause: error });
+  }
+  if (volumesStats.dev === volumeStats.dev) {
+    throw new Error(`recording volume is not mounted at ${volumeRoot}`);
+  }
 }
 
 function formatBytes(bytes) {

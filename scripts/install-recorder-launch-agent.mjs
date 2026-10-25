@@ -13,7 +13,8 @@ const runAsUser = process.env.PATROL_RECORDER_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const retentionEnabled = process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true';
-const deleteConcurrency = process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '64';
+const deleteConcurrency = process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '2';
+const filesystemThreadpoolSize = process.env.PATROL_RECORDING_FS_THREADPOOL_SIZE ?? '8';
 const mainRetentionDays = process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS ?? '7';
 const subRetentionDays = process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ?? '30';
 const storageLowWatermark = process.env.PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT ?? '10';
@@ -119,7 +120,7 @@ function renderLaunchAgent() {
     `PATROL_SUB_RECORDING_RETENTION_DAYS=${subRetentionDays}`,
     `PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=${storageLowWatermark}`,
     `PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=${storageHighWatermark}`,
-    `UV_THREADPOOL_SIZE=${deleteConcurrency}`,
+    `UV_THREADPOOL_SIZE=${filesystemThreadpoolSize}`,
     nixPath,
     'develop',
     '--command',
