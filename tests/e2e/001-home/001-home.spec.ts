@@ -576,6 +576,9 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   await tester.step('recording-history', {
     description: 'Observed events are linked to retained recordings',
     networkStatus: 'skip',
+    beforeScreenshot: async () => {
+      await page.evaluate(() => window.scrollTo(0, 0));
+    },
     verifications: [
       {
         spec: 'History tab is selected',
