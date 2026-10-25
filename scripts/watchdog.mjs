@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { refreshProcessHealth } from './lib/process-health.mjs';
+import { nextWatchdogNotificationState } from './lib/watchdog-notifications.mjs';
 import {
   appendProcessHeartbeat,
   appendSystemEvent
@@ -8,12 +9,15 @@ import {
 
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(process.cwd(), '.patrol');
 const envFile = process.env.PATROL_WATCHDOG_ENV_FILE ?? path.join(dataRoot, 'watchdog.env');
+
+await loadEnvFile(envFile);
+
 const stateFile = process.env.PATROL_WATCHDOG_STATE_FILE ?? path.join(dataRoot, 'watchdog-state.json');
 const healthUrl = process.env.PATROL_WATCHDOG_HEALTH_URL ?? 'http://127.0.0.1:5184/api/system/heartbeat';
 const timeoutMs = Number(process.env.PATROL_WATCHDOG_TIMEOUT_MS ?? '10000');
 const notificationCooldownMs = Number(process.env.PATROL_WATCHDOG_NOTIFY_COOLDOWN_MS ?? '900000');
-
-await loadEnvFile(envFile);
+const failureGraceMs = Number(process.env.PATROL_WATCHDOG_FAILURE_GRACE_MS ?? '180000');
+const recoveryGraceMs = Number(process.env.PATROL_WATCHDOG_RECOVERY_GRACE_MS ?? '120000');
 
 await appendProcessHeartbeat({
   processId: 'patrol-watchdog',
@@ -25,12 +29,18 @@ await appendProcessHeartbeat({
 const previousState = await readState();
 const check = await checkPatrolHealth();
 const signature = check.ok ? 'ok' : check.failures.map((failure) => `${failure.id}:${failure.health}`).join('|');
-const notifyFailure = !check.ok && shouldNotify(previousState, signature);
-const notifyRecovery =
-  check.ok &&
-  previousState.status === 'failure' &&
-  process.env.PATROL_WATCHDOG_NOTIFY_RECOVERY !== '0' &&
-  process.env.PATROL_WATCHDOG_DRY_RUN !== '1';
+const notificationDecision = nextWatchdogNotificationState({
+  checkOk: check.ok,
+  signature,
+  previousState,
+  nowMs: Date.now(),
+  failureGraceMs,
+  recoveryGraceMs,
+  notificationCooldownMs,
+  dryRun: process.env.PATROL_WATCHDOG_DRY_RUN === '1',
+  notifyRecoveryEnabled: process.env.PATROL_WATCHDOG_NOTIFY_RECOVERY !== '0'
+});
+const { notifyFailure, notifyRecovery } = notificationDecision;
 
 await appendSystemEvent({
   type: 'system.watchdog.check_completed',
@@ -70,12 +80,7 @@ if (notifyRecovery) {
   });
 }
 
-await writeState({
-  status: check.ok ? 'ok' : 'failure',
-  signature,
-  lastCheckedAtMs: Date.now(),
-  lastNotificationAtMs: notifyFailure || notifyRecovery ? Date.now() : previousState.lastNotificationAtMs ?? null
-});
+await writeState(notificationDecision.state);
 
 if (!check.ok) {
   console.error(failureMessage(check));
@@ -208,23 +213,6 @@ function failedCheck(failures) {
     totalCount: failures.length,
     failures
   };
-}
-
-function shouldNotify(previousState, signature) {
-  if (process.env.PATROL_WATCHDOG_DRY_RUN === '1') {
-    return false;
-  }
-
-  if (previousState.status !== 'failure') {
-    return true;
-  }
-
-  if (previousState.signature !== signature) {
-    return true;
-  }
-
-  const lastNotificationAtMs = previousState.lastNotificationAtMs ?? 0;
-  return Date.now() - lastNotificationAtMs >= notificationCooldownMs;
 }
 
 async function sendPushoverNotification(message, priority = 1) {
