@@ -195,6 +195,8 @@ async function ensureEnvFile() {
     `PATROL_PUSHOVER_USER=${user}`,
     'PATROL_WATCHDOG_HEALTH_URL=http://127.0.0.1:5184/api/system/heartbeat',
     'PATROL_WATCHDOG_NOTIFY_COOLDOWN_MS=900000',
+    'PATROL_WATCHDOG_FAILURE_GRACE_MS=180000',
+    'PATROL_WATCHDOG_RECOVERY_GRACE_MS=120000',
     'PATROL_PUSHOVER_SOUND=bugle',
     ''
   ].join('\n');

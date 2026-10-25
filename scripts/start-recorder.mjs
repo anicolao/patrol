@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, rename, stat, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { recordingFfmpegArgs } from './lib/recorder-ffmpeg.mjs';
 import { delay } from './lib/async.mjs';
 import {
   appendCameraEvent,
@@ -144,42 +145,6 @@ if (children.length === 0) {
 
 function startRecorder(camera, role, streamName) {
   const streamUrl = `${go2rtcRtspBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(streamName)}`;
-  const baseArgs = [
-    '-hide_banner',
-    '-nostdin',
-    '-loglevel',
-    'warning',
-    '-rtsp_transport',
-    'tcp',
-    '-i',
-    streamUrl,
-    '-map',
-    '0:v:0',
-    '-map',
-    '0:a?',
-    '-c:v',
-    'copy',
-    '-c:a',
-    'aac',
-    '-b:a',
-    '64k',
-    '-f',
-    'segment',
-    '-segment_format',
-    'mp4',
-    '-segment_time',
-    String(segmentSeconds),
-    '-segment_list',
-    'pipe:1',
-    '-segment_list_type',
-    'csv',
-    '-segment_list_flags',
-    '+live',
-    '-segment_format_options',
-    'movflags=+faststart',
-    '-reset_timestamps',
-    '1'
-  ];
   let child = null;
   let restartTimer = null;
   let restartAttempts = 0;
@@ -203,7 +168,7 @@ function startRecorder(camera, role, streamName) {
     launchSequence += 1;
     lastCompletionAtMs = Date.now();
     const outputPattern = ffmpegRecordingPattern(recordingsDir, streamName, launchId);
-    child = spawn('ffmpeg', [...baseArgs, outputPattern], {
+    child = spawn('ffmpeg', recordingFfmpegArgs({ streamUrl, segmentSeconds, outputPattern }), {
       stdio: ['ignore', 'pipe', 'pipe']
     });
     console.error(`recording ${role} stream ${streamName} from ${streamUrl}`);

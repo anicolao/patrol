@@ -292,6 +292,20 @@ NVR files in production. Existing thumbnails remain available. Re-enable
 generation only during a planned maintenance window; even a single archival
 read from this USB/APFS volume can block all active writers.
 
+Live recording segments intentionally omit MP4 `faststart` processing. Moving
+the MP4 metadata to the beginning requires another pass over every completed
+file; doing that concurrently for all streams can block USB/APFS writers and
+make go2rtc drop packets. Finalized recordings remain seekable through HTTP
+range requests without that rewrite.
+
+The watchdog treats changing stream failures as one continuous incident. It
+waits three minutes before sending the first failure notification, sends at
+most one failure notification every 15 minutes while the incident continues,
+and requires two minutes of stable health before announcing recovery. Override
+these defaults with `PATROL_WATCHDOG_FAILURE_GRACE_MS`,
+`PATROL_WATCHDOG_NOTIFY_COOLDOWN_MS`, and
+`PATROL_WATCHDOG_RECOVERY_GRACE_MS` in `watchdog.env` when necessary.
+
 On startup the recorder refuses to create or use a path below `/Volumes` unless
 that volume is actually mounted. Launchd retries it after the NVR volume
 appears; this prevents an unavailable external disk from redirecting recordings
