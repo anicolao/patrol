@@ -456,6 +456,12 @@ test('frontend serves Patrol camera discovery', async ({ page }, testInfo) => {
   await tester.step('health-tab-configured', {
     description: 'go2rtc configuration status is in system health',
     networkStatus: 'skip',
+    beforeScreenshot: async () => {
+      await page
+        .locator('span')
+        .filter({ hasText: /^last alive \d+ seconds ago$/ })
+        .evaluateAll((elements) => elements.forEach((element) => (element.textContent = 'last alive 15 seconds ago')));
+    },
     verifications: [
       {
         spec: 'Health tab is selected',
