@@ -82,6 +82,11 @@ should be an event explaining what it saw, decided, or was asked to do.
 
 ## Operations
 
+Use `DEPLOYMENT.md` for the authoritative Mac mini release, installation,
+verification, and rollback procedure. Production code must be pulled from a
+reviewed revision on `origin/main`; do not copy individual source files or edit
+LaunchAgent plists by hand.
+
 Use `SERVICES_SETUP.md` to install the persistent event WebSocket, Annke alert,
 state checkpoint, and person recognition workers as independent macOS user
 LaunchAgents.

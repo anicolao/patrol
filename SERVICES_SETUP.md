@@ -12,11 +12,11 @@ user LaunchAgents:
 - `patrol-thumbnailer`
 
 For a Mac that automatically logs in a desktop user, install the agents in
-that user's GUI launchd domain:
+that user's GUI launchd domain. The production paths are:
 
 ```sh
 PATROL_SERVICES_REPO_ROOT=/Users/security/projects/patrol \
-PATROL_DATA_DIR=/Volumes/NVR/patrol \
+PATROL_DATA_DIR=/Users/security/Library/PatrolData \
 PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
 PATROL_SERVICES_RUN_AS_USER=security \
 nix develop --command patrol-service-launch-agents-install
@@ -27,6 +27,10 @@ Run the installer from a checkout accessible to the auto-login user. When
 non-interactive SSH to that account on `localhost`. Each agent has `RunAtLoad`
 and `KeepAlive` enabled, restarts independently, and writes output under
 `~/Library/Logs/Patrol/` for the auto-login user.
+
+The production host uses a separate launcher checkout owned by `emrys`; see
+[`DEPLOYMENT.md`](DEPLOYMENT.md) for the exact command. Do not run this installer
+from a copied script or hand-edit the generated plist.
 
 To install or reinstall only selected agents, pass a comma-separated subset:
 
