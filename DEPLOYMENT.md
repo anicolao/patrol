@@ -61,7 +61,7 @@ inspect and preserve it before continuing.
 
 ```sh
 ssh security@emryss-mac-mini '
-  set -e
+  set -euo pipefail
   cd /Users/security/projects/patrol
   test -z "$(git status --porcelain)"
   git remote set-url origin https://github.com/anicolao/patrol.git
@@ -86,7 +86,7 @@ that state in a named stash before the first clean pull:
 
 ```sh
 ssh security@emryss-mac-mini '
-  set -e
+  set -euo pipefail
   cd /Users/security/projects/patrol
   git status --short
   git stash push --include-untracked -m "pre-clean-deployment-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -106,7 +106,7 @@ Create the installer checkout once, after the release is present on `main`:
 
 ```sh
 ssh emrys@emryss-mac-mini '
-  set -e
+  set -euo pipefail
   if ! test -d /Users/emrys/projects/patrol-launchers/.git; then
     git clone --branch main --single-branch \
       https://github.com/anicolao/patrol.git \
@@ -120,7 +120,7 @@ Update and verify it for every deployment:
 ```sh
 ssh emrys@emryss-mac-mini '
   /bin/zsh -lc "
-    set -e
+    set -euo pipefail
     cd /Users/emrys/projects/patrol-launchers
     test -z \"\$(git status --porcelain)\"
     git fetch origin --prune
@@ -135,7 +135,10 @@ ssh emrys@emryss-mac-mini '
 
 Run the tracked installers from the `emrys` checkout. These commands regenerate
 the complete plist arrays, bootstrap them in `gui/501`, and replace any ad-hoc
-plist changes.
+plist changes. Persistent jobs request an SSH pseudo-terminal so terminating a
+LaunchAgent also sends a hangup to its process in the protected `security`
+account; this prevents old processes from retaining service ports after a
+restart.
 
 Install the shared services first:
 
@@ -215,7 +218,7 @@ Wait at least 90 seconds for heartbeats and recording segments, then verify:
 
 ```sh
 ssh security@emryss-mac-mini '
-  set -e
+  set -euo pipefail
   health=$(curl -fsS -X POST http://127.0.0.1:5184/api/system/heartbeat)
   echo "$health" | jq -e ".errors | length == 0" >/dev/null
   echo "$health" | jq -e "[.processes[] | select(.health != \"ok\")] | length == 0" >/dev/null
@@ -233,7 +236,7 @@ ssh security@emryss-mac-mini '
 ssh emrys@emryss-mac-mini '
   for name in go2rtc events-ws web state-checkpoint annke-events person-recognizer thumbnailer recorder watchdog; do
     echo "=== $name"
-    sudo -n -H -u emrys launchctl print gui/501/com.patrol.$name 2>/dev/null | \
+    launchctl print gui/501/com.patrol.$name 2>/dev/null | \
       grep -E "state =|last exit code" | head -2
   done
 '
