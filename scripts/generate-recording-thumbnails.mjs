@@ -27,6 +27,9 @@ const retryMs = positiveNumber('PATROL_THUMBNAILER_RETRY_MS', 5 * 60 * 1000);
 const commandTimeoutMs = positiveNumber('PATROL_THUMBNAILER_COMMAND_TIMEOUT_MS', 15000);
 const batchSize = Math.floor(positiveNumber('PATROL_THUMBNAILER_BATCH_SIZE', 25));
 const workDelayMs = positiveNumber('PATROL_THUMBNAILER_WORK_DELAY_MS', 8000);
+const enabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.PATROL_THUMBNAILER_ENABLED ?? 'true').toLowerCase()
+);
 const once = process.env.PATROL_THUMBNAILER_ONCE === '1';
 
 let stopping = false;
@@ -42,7 +45,9 @@ const heartbeat = startProcessHeartbeats({
   processId,
   label,
   kind,
-  detail: 'Precomputes local JPEG previews for main recording segments'
+  detail: enabled
+    ? 'Precomputes local JPEG previews for main recording segments'
+    : 'Thumbnail generation is idle to protect recording I/O'
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -53,13 +58,20 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 try {
-  do {
-    const generated = await generateBatch();
-    const cleaned = await cleanupBatch();
-    if (!once && !stopping && generated === 0 && cleaned === 0) {
-      await sleep(pollMs);
+  if (!enabled) {
+    console.error('recording thumbnail generation is disabled; worker remains alive for health visibility');
+    while (!stopping) {
+      await sleep(60_000);
     }
-  } while (!once && !stopping);
+  } else {
+    do {
+      const generated = await generateBatch();
+      const cleaned = await cleanupBatch();
+      if (!once && !stopping && generated === 0 && cleaned === 0) {
+        await sleep(pollMs);
+      }
+    } while (!once && !stopping);
+  }
 } catch (error) {
   console.error('recording thumbnail worker failed:', error);
   await shutdown(1, null);

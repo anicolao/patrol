@@ -177,6 +177,7 @@ ssh emrys@emryss-mac-mini '
     PATROL_SERVICES_RUN_AS_USER=security \
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
     PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
+    PATROL_THUMBNAILER_ENABLED=false \
     PATROL_THUMBNAILER_WORK_DELAY_MS=8000 \
     PATROL_NIX_BIN=/run/current-system/sw/bin/nix \
     /bin/zsh -lc "cd /Users/emrys/projects/patrol-launchers && \
@@ -285,6 +286,11 @@ enabled: below the low watermark the recorder deliberately stops its writers,
 reclaims space to the high watermark, and starts every writer again. This makes
 the unavoidable maintenance gap explicit and self-healing instead of silently
 stalling every stream.
+
+The thumbnail worker remains installed and healthy but does not scan historical
+NVR files in production. Existing thumbnails remain available. Re-enable
+generation only during a planned maintenance window; even a single archival
+read from this USB/APFS volume can block all active writers.
 
 On startup the recorder refuses to create or use a path below `/Volumes` unless
 that volume is actually mounted. Launchd retries it after the NVR volume

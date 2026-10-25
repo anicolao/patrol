@@ -51,6 +51,7 @@ const runAsUser = process.env.PATROL_SERVICES_RUN_AS_USER ?? currentUser;
 const dataRoot = process.env.PATROL_DATA_DIR ?? path.join(repoRoot, '.patrol');
 const recordingsDir = process.env.PATROL_RECORDINGS_DIR ?? path.join(dataRoot, 'recordings');
 const thumbnailDir = process.env.PATROL_THUMBNAIL_DIR ?? null;
+const thumbnailEnabled = process.env.PATROL_THUMBNAILER_ENABLED ?? 'true';
 const thumbnailWorkDelayMs = process.env.PATROL_THUMBNAILER_WORK_DELAY_MS ?? '8000';
 const nixPath = process.env.PATROL_NIX_BIN ?? findExecutable('nix');
 const domain = `gui/${process.getuid()}`;
@@ -176,6 +177,7 @@ function renderLaunchAgent(service, logFile) {
     `PATROL_DATA_DIR=${dataRoot}`,
     `PATROL_RECORDINGS_DIR=${recordingsDir}`,
     ...(thumbnailDir ? [`PATROL_THUMBNAIL_DIR=${thumbnailDir}`] : []),
+    ...(service.id === 'thumbnailer' ? [`PATROL_THUMBNAILER_ENABLED=${thumbnailEnabled}`] : []),
     ...(service.id === 'thumbnailer' ? [`PATROL_THUMBNAILER_WORK_DELAY_MS=${thumbnailWorkDelayMs}`] : []),
     nixPath,
     'develop',
