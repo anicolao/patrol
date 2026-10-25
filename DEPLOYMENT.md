@@ -69,15 +69,30 @@ ssh security@emryss-mac-mini '
   git switch main
   git merge --ff-only origin/main
   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+'
+```
+
+Stop the persistent LaunchAgents before replacing dependencies and build
+output. This creates a short maintenance window and avoids changing files
+beneath running Node processes:
+
+```sh
+ssh emrys@emryss-mac-mini '
+  set -euo pipefail
+  for name in go2rtc events-ws web state-checkpoint annke-events person-recognizer thumbnailer recorder; do
+    launchctl bootout "gui/501/com.patrol.$name" 2>/dev/null || true
+  done
+'
+
+ssh security@emryss-mac-mini '
+  set -euo pipefail
+  cd /Users/security/projects/patrol
   nix develop --command npm ci
   nix develop --command npm run check
   nix develop --command npm run test:unit
   nix develop --command npm run build
 '
 ```
-
-The existing processes may remain running during this step; they keep their
-already-loaded code until the LaunchAgents are reinstalled below.
 
 ### One-time recovery from a copied-file deployment
 
@@ -165,11 +180,13 @@ ssh emrys@emryss-mac-mini '
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
     PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
     PATROL_RECORDING_RETENTION_ENABLED=true \
+    PATROL_RECORDING_SEGMENT_SECONDS=60 \
     PATROL_MAIN_RECORDING_RETENTION_DAYS=7 \
     PATROL_SUB_RECORDING_RETENTION_DAYS=30 \
     PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10 \
     PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15 \
-    PATROL_RECORDING_DELETE_CONCURRENCY=2 \
+    PATROL_RECORDING_DELETE_CONCURRENCY=1 \
+    PATROL_RECORDING_DELETE_DELAY_MS=1000 \
     PATROL_RECORDING_FS_THREADPOOL_SIZE=8 \
     PATROL_NIX_BIN=/run/current-system/sw/bin/nix \
     /bin/zsh -lc "cd /Users/emrys/projects/patrol-launchers && \

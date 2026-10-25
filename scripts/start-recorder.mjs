@@ -27,7 +27,7 @@ const secretsDir = path.join(dataRoot, 'secrets');
 const cacheDir = path.join(dataRoot, 'cache');
 const recordingsDir = patrolRecordingsDir(dataRoot);
 const go2rtcRtspBaseUrl = process.env.PATROL_GO2RTC_RTSP_BASE_URL ?? 'rtsp://127.0.0.1:8554';
-const segmentSeconds = Number(process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '15');
+const segmentSeconds = Number(process.env.PATROL_RECORDING_SEGMENT_SECONDS ?? '60');
 const restartDelayMs = Number(process.env.PATROL_RECORDING_RESTART_DELAY_MS ?? '250');
 const restartMaxDelayMs = Number(process.env.PATROL_RECORDING_RESTART_MAX_DELAY_MS ?? '5000');
 const mainRetentionMs = Number(process.env.PATROL_MAIN_RECORDING_RETENTION_DAYS ?? '7') * 24 * 60 * 60 * 1000;
@@ -60,10 +60,15 @@ const storageHighWatermark = Math.max(
   storageLowWatermark,
   boundedRatio(process.env.PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT, 15)
 );
-const configuredDeleteConcurrency = Number(process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '2');
+const configuredDeleteConcurrency = Number(process.env.PATROL_RECORDING_DELETE_CONCURRENCY ?? '1');
 const deleteConcurrency = Math.max(
   1,
-  Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 2)
+  Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 1)
+);
+const configuredDeleteDelayMs = Number(process.env.PATROL_RECORDING_DELETE_DELAY_MS ?? '1000');
+const deleteDelayMs = Math.max(
+  0,
+  Math.floor(Number.isFinite(configuredDeleteDelayMs) ? configuredDeleteDelayMs : 1000)
 );
 
 await assertExternalRecordingVolumeMounted(recordingsDir);
@@ -118,8 +123,9 @@ if (cleanupOnly) {
   }
   process.exit(0);
 }
-await recoverStagedSegments();
+const stagedSegmentsToRecover = await listStagedSegmentsToRecover();
 children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
+await recoverStagedSegments(stagedSegmentsToRecover);
 
 if (retentionEnabled) {
   void sweepRetentionIfIdle();
@@ -316,7 +322,8 @@ function startRecorder(camera, role, streamName) {
   };
 }
 
-async function recoverStagedSegments() {
+async function listStagedSegmentsToRecover() {
+  const stagedSegments = [];
   for (const { camera, role, streamName } of streams) {
     const stagingDir = path.join(recordingsDir, '.staging', streamName);
     let entries;
@@ -332,28 +339,37 @@ async function recoverStagedSegments() {
       if (!entry.isFile() || !entry.name.endsWith('.m4v')) {
         continue;
       }
+      stagedSegments.push({
+        camera,
+        role,
+        streamName,
+        fileName: entry.name,
+        stagingPath: path.join(stagingDir, entry.name)
+      });
+    }
+  }
+  return stagedSegments;
+}
+
+async function recoverStagedSegments(stagedSegments) {
+  for (const { camera, role, streamName, fileName, stagingPath } of stagedSegments) {
+    try {
+      const segment = await persistStagedSegment({
+        camera,
+        role,
+        streamName,
+        stagingPath,
+        preferredStartMs: null
+      });
+      console.error(`recovered staged recording ${segment.relativePath}`);
+    } catch (error) {
+      console.error(`could not recover staged recording ${streamName}/${fileName}:`, error);
       try {
-        const segment = await persistStagedSegment({
-          camera,
-          role,
-          streamName,
-          stagingPath: path.join(stagingDir, entry.name),
-          preferredStartMs: null
-        });
-        console.error(`recovered staged recording ${segment.relativePath}`);
-      } catch (error) {
-        console.error(`could not recover staged recording ${streamName}/${entry.name}:`, error);
-        try {
-          const stagedPath = path.join(stagingDir, entry.name);
-          const stagedStats = await stat(stagedPath);
-          if (stagedStats.size <= 1024) {
-            await unlink(stagedPath);
-            console.error(`removed empty staged recording ${streamName}/${entry.name}`);
-          }
-        } catch (unlinkError) {
-          if (unlinkError?.code !== 'ENOENT') {
-            console.error(`could not remove unusable staged recording ${streamName}/${entry.name}:`, unlinkError);
-          }
+        await unlink(stagingPath);
+        console.error(`removed unusable staged recording ${streamName}/${fileName}`);
+      } catch (unlinkError) {
+        if (unlinkError?.code !== 'ENOENT') {
+          console.error(`could not remove unusable staged recording ${streamName}/${fileName}:`, unlinkError);
         }
       }
     }
@@ -527,6 +543,9 @@ async function mapWithConcurrency(items, concurrency, operation) {
       const index = nextIndex;
       nextIndex += 1;
       await operation(items[index]);
+      if (deleteDelayMs > 0 && nextIndex < items.length) {
+        await delay(deleteDelayMs);
+      }
     }
   });
   await Promise.all(workers);
