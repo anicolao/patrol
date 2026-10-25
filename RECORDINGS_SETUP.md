@@ -96,6 +96,7 @@ PATROL_RECORDING_STALL_TIMEOUT_MS=90000
 PATROL_MAIN_RECORDING_RETENTION_DAYS=7
 PATROL_SUB_RECORDING_RETENTION_DAYS=30
 PATROL_RECORDING_RETENTION_ENABLED=true
+PATROL_RECORDING_RECOVERY_ENABLED=true
 PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10
 PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15
 PATROL_RECORDING_DELETE_CONCURRENCY=1
@@ -115,6 +116,9 @@ Unrecoverable staged fragments are renamed with a `.rejected-<timestamp>`
 suffix instead of being deleted while recording is active. They are ignored on
 subsequent starts and can be purged during an offline maintenance window; the
 rename avoids an expensive extent-freeing operation on the live APFS volume.
+Production sets `PATROL_RECORDING_RECOVERY_ENABLED=false` so a restart never
+scans old NVR files before or alongside live capture. Run recovery only in a
+planned offline maintenance window.
 
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
 without deleting expired recordings. This is useful while validating a new

@@ -177,6 +177,7 @@ ssh emrys@emryss-mac-mini '
     PATROL_SERVICES_RUN_AS_USER=security \
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
     PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
+    PATROL_THUMBNAILER_WORK_DELAY_MS=8000 \
     PATROL_NIX_BIN=/run/current-system/sw/bin/nix \
     /bin/zsh -lc "cd /Users/emrys/projects/patrol-launchers && \
       exec /run/current-system/sw/bin/nix develop --command patrol-service-launch-agents-install"
@@ -193,6 +194,7 @@ ssh emrys@emryss-mac-mini '
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
     PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
     PATROL_RECORDING_RETENTION_ENABLED=true \
+    PATROL_RECORDING_RECOVERY_ENABLED=false \
     PATROL_RECORDING_SEGMENT_SECONDS=60 \
     PATROL_MAIN_RECORDING_RETENTION_DAYS=7 \
     PATROL_SUB_RECORDING_RETENTION_DAYS=30 \

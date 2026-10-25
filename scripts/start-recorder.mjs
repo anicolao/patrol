@@ -36,6 +36,9 @@ const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ??
 const retentionEnabled = !['0', 'false', 'no', 'off'].includes(
   String(process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true').toLowerCase()
 );
+const recoveryEnabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.PATROL_RECORDING_RECOVERY_ENABLED ?? 'true').toLowerCase()
+);
 const cleanupOnly = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.PATROL_RECORDING_CLEANUP_ONLY ?? 'false').toLowerCase()
 );
@@ -124,7 +127,7 @@ if (cleanupOnly) {
   }
   process.exit(0);
 }
-const stagedSegmentsToRecover = await listStagedSegmentsToRecover();
+const stagedSegmentsToRecover = recoveryEnabled ? await listStagedSegmentsToRecover() : [];
 children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
 await recoverStagedSegments(stagedSegmentsToRecover);
 

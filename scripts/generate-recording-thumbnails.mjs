@@ -11,6 +11,7 @@ import {
   thumbnailRelativePath
 } from '../src/lib/server/recording-thumbnails.ts';
 import { appendProcessExited, startProcessHeartbeats } from './lib/patrol-events.mjs';
+import { delay } from './lib/async.mjs';
 import { patrolDataRoot, patrolRecordingsDir } from './lib/patrol-paths.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -25,6 +26,7 @@ const pollMs = positiveNumber('PATROL_THUMBNAILER_POLL_MS', 2000);
 const retryMs = positiveNumber('PATROL_THUMBNAILER_RETRY_MS', 5 * 60 * 1000);
 const commandTimeoutMs = positiveNumber('PATROL_THUMBNAILER_COMMAND_TIMEOUT_MS', 15000);
 const batchSize = Math.floor(positiveNumber('PATROL_THUMBNAILER_BATCH_SIZE', 25));
+const workDelayMs = positiveNumber('PATROL_THUMBNAILER_WORK_DELAY_MS', 8000);
 const once = process.env.PATROL_THUMBNAILER_ONCE === '1';
 
 let stopping = false;
@@ -98,6 +100,9 @@ async function generateBatch() {
         relativePath: candidate.relativePath,
         error: message
       }));
+    }
+    if (!stopping) {
+      await delay(workDelayMs);
     }
   }
   if (candidates.length > 0) {
