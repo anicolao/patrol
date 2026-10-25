@@ -24,7 +24,9 @@ Prerequisites:
 
 - `emrys` can clone `https://github.com/anicolao/patrol.git` without credentials.
 - `emrys` can run `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes security@localhost true`.
-- `security` can fetch the repository's configured `origin` remote.
+- The runtime checkout uses the public HTTPS remote
+  `https://github.com/anicolao/patrol.git` so deployment does not depend on a
+  GitHub SSH key for `security`.
 - `/Volumes/NVR` is mounted and `/Volumes/NVR/recordings` is writable by `security`.
 - `/Users/security/Library/PatrolData/watchdog.env` exists and is readable only by `security`.
 
@@ -62,6 +64,7 @@ ssh security@emryss-mac-mini '
   set -e
   cd /Users/security/projects/patrol
   test -z "$(git status --porcelain)"
+  git remote set-url origin https://github.com/anicolao/patrol.git
   git fetch origin --prune
   git switch main
   git merge --ff-only origin/main
@@ -102,10 +105,10 @@ Do not apply it over the clean checkout.
 Create the installer checkout once, after the release is present on `main`:
 
 ```sh
-ssh anicolao@emryss-mac-mini '
+ssh emrys@emryss-mac-mini '
   set -e
-  if ! sudo -n test -d /Users/emrys/projects/patrol-launchers/.git; then
-    sudo -n -H -u emrys git clone --branch main --single-branch \
+  if ! test -d /Users/emrys/projects/patrol-launchers/.git; then
+    git clone --branch main --single-branch \
       https://github.com/anicolao/patrol.git \
       /Users/emrys/projects/patrol-launchers
   fi
@@ -115,8 +118,8 @@ ssh anicolao@emryss-mac-mini '
 Update and verify it for every deployment:
 
 ```sh
-ssh anicolao@emryss-mac-mini '
-  sudo -n -H -u emrys /bin/zsh -lc "
+ssh emrys@emryss-mac-mini '
+  /bin/zsh -lc "
     set -e
     cd /Users/emrys/projects/patrol-launchers
     test -z \"\$(git status --porcelain)\"
@@ -137,8 +140,8 @@ plist changes.
 Install the shared services first:
 
 ```sh
-ssh anicolao@emryss-mac-mini '
-  sudo -n -H -u emrys env \
+ssh emrys@emryss-mac-mini '
+  env \
     PATROL_SERVICES_REPO_ROOT=/Users/security/projects/patrol \
     PATROL_SERVICES_RUN_AS_USER=security \
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
@@ -152,8 +155,8 @@ ssh anicolao@emryss-mac-mini '
 Install the recorder with the approved retention policy:
 
 ```sh
-ssh anicolao@emryss-mac-mini '
-  sudo -n -H -u emrys env \
+ssh emrys@emryss-mac-mini '
+  env \
     PATROL_RECORDER_REPO_ROOT=/Users/security/projects/patrol \
     PATROL_RECORDER_RUN_AS_USER=security \
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
@@ -163,7 +166,8 @@ ssh anicolao@emryss-mac-mini '
     PATROL_SUB_RECORDING_RETENTION_DAYS=30 \
     PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10 \
     PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15 \
-    PATROL_RECORDING_DELETE_CONCURRENCY=64 \
+    PATROL_RECORDING_DELETE_CONCURRENCY=2 \
+    PATROL_RECORDING_FS_THREADPOOL_SIZE=8 \
     PATROL_NIX_BIN=/run/current-system/sw/bin/nix \
     /bin/zsh -lc "cd /Users/emrys/projects/patrol-launchers && \
       exec /run/current-system/sw/bin/nix develop --command patrol-recorder-launch-agent-install"
@@ -173,8 +177,8 @@ ssh anicolao@emryss-mac-mini '
 Install the watchdog last:
 
 ```sh
-ssh anicolao@emryss-mac-mini '
-  sudo -n -H -u emrys env \
+ssh emrys@emryss-mac-mini '
+  env \
     PATROL_WATCHDOG_REPO_ROOT=/Users/security/projects/patrol \
     PATROL_WATCHDOG_RUN_AS_USER=security \
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
@@ -197,8 +201,8 @@ ssh security@emryss-mac-mini '
   git rev-parse origin/main
 '
 
-ssh anicolao@emryss-mac-mini '
-  sudo -n -H -u emrys /bin/zsh -lc "
+ssh emrys@emryss-mac-mini '
+  /bin/zsh -lc "
     cd /Users/emrys/projects/patrol-launchers
     git status --short --branch
     git rev-parse HEAD
@@ -218,10 +222,15 @@ ssh security@emryss-mac-mini '
   echo "$health" | jq -e "([.devices[].go2rtc.streams[]] | length) == ([.devices[].go2rtc.streams[] | select(.health == \"streaming\")] | length)" >/dev/null
   echo "$health" | jq -c "{processes: [.processes[] | .health] | group_by(.) | map({(.[0]): length}) | add, cameras: (.devices | length), errors: (.errors | length)}"
   echo "recorders=$(ps -axo command | grep \"ffmpeg -hide_banner -nostdin\" | grep -v grep | wc -l | tr -d \" \")"
+  recent_streams=$(/usr/bin/sqlite3 \
+    /Users/security/Library/PatrolData/cache/recording-catalog.sqlite \
+    "SELECT count(*) FROM (SELECT stream_name FROM recording_segments GROUP BY stream_name HAVING max(observed_at_ms) >= (unixepoch('now') - 180) * 1000);")
+  test "$recent_streams" -eq 14
+  echo "recording_streams_advanced=$recent_streams/14"
   df -h /Volumes/NVR /System/Volumes/Data
 '
 
-ssh anicolao@emryss-mac-mini '
+ssh emrys@emryss-mac-mini '
   for name in go2rtc events-ws web state-checkpoint annke-events person-recognizer thumbnailer recorder watchdog; do
     echo "=== $name"
     sudo -n -H -u emrys launchctl print gui/501/com.patrol.$name 2>/dev/null | \
@@ -232,6 +241,11 @@ ssh anicolao@emryss-mac-mini '
 
 The watchdog is a one-shot job, so `state = not running` with `last exit code = 0`
 is healthy. Persistent services must report `state = running`.
+
+On startup the recorder refuses to create or use a path below `/Volumes` unless
+that volume is actually mounted. Launchd retries it after the NVR volume
+appears; this prevents an unavailable external disk from redirecting recordings
+onto the internal system disk.
 
 ## Rollback
 

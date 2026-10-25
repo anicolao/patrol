@@ -97,8 +97,14 @@ PATROL_SUB_RECORDING_RETENTION_DAYS=30
 PATROL_RECORDING_RETENTION_ENABLED=true
 PATROL_RECORDING_STORAGE_LOW_WATERMARK_PERCENT=10
 PATROL_RECORDING_STORAGE_HIGH_WATERMARK_PERCENT=15
-PATROL_RECORDING_DELETE_CONCURRENCY=64
+PATROL_RECORDING_DELETE_CONCURRENCY=2
+PATROL_RECORDING_FS_THREADPOOL_SIZE=8
 ```
+
+Keep the filesystem worker pool larger than the deletion concurrency. This
+leaves workers available to finalize new segments while retention cleanup is
+removing old files. High deletion concurrency can saturate metadata I/O on the
+USB APFS volume and stall active recordings.
 
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
 without deleting expired recordings. This is useful while validating a new
