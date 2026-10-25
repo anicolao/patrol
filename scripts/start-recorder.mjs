@@ -36,6 +36,9 @@ const subRetentionMs = Number(process.env.PATROL_SUB_RECORDING_RETENTION_DAYS ??
 const retentionEnabled = !['0', 'false', 'no', 'off'].includes(
   String(process.env.PATROL_RECORDING_RETENTION_ENABLED ?? 'true').toLowerCase()
 );
+const ageRetentionEnabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.PATROL_RECORDING_AGE_RETENTION_ENABLED ?? 'true').toLowerCase()
+);
 const recoveryEnabled = !['0', 'false', 'no', 'off'].includes(
   String(process.env.PATROL_RECORDING_RECOVERY_ENABLED ?? 'true').toLowerCase()
 );
@@ -128,7 +131,7 @@ if (cleanupOnly) {
   process.exit(0);
 }
 const stagedSegmentsToRecover = recoveryEnabled ? await listStagedSegmentsToRecover() : [];
-children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
+startRecorderChildren();
 await recoverStagedSegments(stagedSegmentsToRecover);
 
 if (retentionEnabled) {
@@ -428,11 +431,12 @@ async function sweepRetentionIfIdle({ forcePressure = false } = {}) {
     return;
   }
   retentionSweepInFlight = true;
+  let pausedForPressure = false;
   try {
     const nowMs = Date.now();
     let ageExpired = 0;
     let ageReclaimedBytes = 0;
-    while (!stopping) {
+    while (ageRetentionEnabled && !stopping) {
       const expired = catalog.segmentsPastRetention(
         nowMs - mainRetentionMs,
         nowMs - subRetentionMs,
@@ -471,6 +475,12 @@ async function sweepRetentionIfIdle({ forcePressure = false } = {}) {
       console.error(`recording storage pressure cleared at ${(storage.availableRatio * 100).toFixed(1)}% free`);
     }
 
+    if (!cleanupOnly && storagePressureActive && storage.availableRatio < storageHighWatermark) {
+      await stopRecorderChildren('SIGTERM');
+      pausedForPressure = true;
+      console.error('recording paused while storage pressure cleanup reclaims space');
+    }
+
     let totalReclaimedBytes = 0;
     let totalExpired = 0;
     while (storagePressureActive && storage.availableRatio < storageHighWatermark) {
@@ -498,8 +508,22 @@ async function sweepRetentionIfIdle({ forcePressure = false } = {}) {
   } catch (error) {
     console.error('recording retention sweep failed:', error);
   } finally {
+    if (pausedForPressure && !stopping) {
+      startRecorderChildren();
+      console.error('recording resumed after storage pressure cleanup');
+    }
     retentionSweepInFlight = false;
   }
+}
+
+function startRecorderChildren() {
+  children = streams.map(({ camera, role, streamName }) => startRecorder(camera, role, streamName));
+}
+
+async function stopRecorderChildren(signal) {
+  const activeChildren = children;
+  children = [];
+  await Promise.all(activeChildren.map((child) => child.stop(signal)));
 }
 
 async function expireSegments(segments, nowMs, reason) {

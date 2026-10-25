@@ -194,6 +194,7 @@ ssh emrys@emryss-mac-mini '
     PATROL_DATA_DIR=/Users/security/Library/PatrolData \
     PATROL_RECORDINGS_DIR=/Volumes/NVR/recordings \
     PATROL_RECORDING_RETENTION_ENABLED=true \
+    PATROL_RECORDING_AGE_RETENTION_ENABLED=false \
     PATROL_RECORDING_RECOVERY_ENABLED=false \
     PATROL_RECORDING_SEGMENT_SECONDS=60 \
     PATROL_MAIN_RECORDING_RETENTION_DAYS=7 \
@@ -277,6 +278,13 @@ ssh emrys@emryss-mac-mini '
 The recording-volume and watchdog jobs are periodic jobs, so `state = not
 running` with `last exit code = 0` is healthy. Persistent services must report
 `state = running`.
+
+Routine age deletion is disabled in production because freeing APFS extents on
+the USB disk blocks concurrent writers. Storage-pressure cleanup remains
+enabled: below the low watermark the recorder deliberately stops its writers,
+reclaims space to the high watermark, and starts every writer again. This makes
+the unavoidable maintenance gap explicit and self-healing instead of silently
+stalling every stream.
 
 On startup the recorder refuses to create or use a path below `/Volumes` unless
 that volume is actually mounted. Launchd retries it after the NVR volume
