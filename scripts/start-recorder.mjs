@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readdir, readFile, stat, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { delay } from './lib/async.mjs';
 import {
   appendCameraEvent,
   appendCameraEvents,
@@ -65,10 +66,10 @@ const deleteConcurrency = Math.max(
   1,
   Math.floor(Number.isFinite(configuredDeleteConcurrency) ? configuredDeleteConcurrency : 1)
 );
-const configuredDeleteDelayMs = Number(process.env.PATROL_RECORDING_DELETE_DELAY_MS ?? '1000');
+const configuredDeleteDelayMs = Number(process.env.PATROL_RECORDING_DELETE_DELAY_MS ?? '3000');
 const deleteDelayMs = Math.max(
   0,
-  Math.floor(Number.isFinite(configuredDeleteDelayMs) ? configuredDeleteDelayMs : 1000)
+  Math.floor(Number.isFinite(configuredDeleteDelayMs) ? configuredDeleteDelayMs : 3000)
 );
 
 await assertExternalRecordingVolumeMounted(recordingsDir);
