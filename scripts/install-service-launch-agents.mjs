@@ -185,7 +185,8 @@ function renderLaunchAgent(service, logFile) {
     ? serviceArgs
     : [
         '/usr/bin/ssh',
-        '-T',
+        // A remote PTY delivers SIGHUP when launchd terminates the local SSH client.
+        '-tt',
         '-o',
         'BatchMode=yes',
         '-o',
