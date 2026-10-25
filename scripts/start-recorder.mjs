@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, readFile, stat, statfs, unlink } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { delay } from './lib/async.mjs';
@@ -366,11 +366,12 @@ async function recoverStagedSegments(stagedSegments) {
     } catch (error) {
       console.error(`could not recover staged recording ${streamName}/${fileName}:`, error);
       try {
-        await unlink(stagingPath);
-        console.error(`removed unusable staged recording ${streamName}/${fileName}`);
-      } catch (unlinkError) {
-        if (unlinkError?.code !== 'ENOENT') {
-          console.error(`could not remove unusable staged recording ${streamName}/${fileName}:`, unlinkError);
+        const rejectedPath = `${stagingPath}.rejected-${Date.now()}`;
+        await rename(stagingPath, rejectedPath);
+        console.error(`quarantined unusable staged recording ${streamName}/${path.basename(rejectedPath)}`);
+      } catch (renameError) {
+        if (renameError?.code !== 'ENOENT') {
+          console.error(`could not quarantine unusable staged recording ${streamName}/${fileName}:`, renameError);
         }
       }
     }

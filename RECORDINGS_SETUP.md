@@ -111,6 +111,11 @@ reduce steady-state file creation and deletion to one quarter of the previous
 15-second rate. The same delay is applied while recovering staged segments so
 post-crash cleanup cannot monopolize the volume.
 
+Unrecoverable staged fragments are renamed with a `.rejected-<timestamp>`
+suffix instead of being deleted while recording is active. They are ignored on
+subsequent starts and can be purged during an offline maintenance window; the
+rename avoids an expensive extent-freeing operation on the live APFS volume.
+
 Set `PATROL_RECORDING_RETENTION_ENABLED=false` to record and index segments
 without deleting expired recordings. This is useful while validating a new
 deployment or before an operator has approved retention cleanup.
